@@ -1,0 +1,828 @@
+================================================================================
+SPEAR-EDGE API REFERENCE
+================================================================================
+Document: API_REFERENCE.txt
+Version: 1.0
+Date: 2025-01-XX
+Purpose: Complete API reference for all HTTP REST endpoints and WebSocket
+         connections in SPEAR-Edge
+
+Base URL: http://<jetson_ip>:8000
+WebSocket URL: ws://<jetson_ip>:8000
+
+================================================================================
+1. HTTP REST API ENDPOINTS
+================================================================================
+
+1.1 Health & Status
+-------------------
+
+GET /health
+Description: Basic health check
+Response:
+{
+  "ok": true
+}
+
+GET /health/status
+Description: Detailed system status
+Response:
+{
+  "ok": true,
+  "mode": "manual" | "armed" | "tasked",
+  "sdr_open": true | false,
+  "gps": {
+    "connected": true | false,
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "alt_ft": 100.0
+  } | null
+}
+
+1.2 Hub (System Information)
+----------------------------
+
+GET /api/hub/nodes
+Description: Get list of known Tripwire nodes
+Response:
+{
+  "nodes": {
+    "tripwire-01": {
+      "node_id": "tripwire-01",
+      "callsign": "Tripwire-01",
+      "connected": true,
+      "last_seen": 1234567890.0,
+      "ws_last_seen": 1234567890.0,
+      "gps": {...},
+      "meta": {...}
+    },
+    ...
+  }
+}
+
+1.3 Live Scan Control
+---------------------
+
+POST /live/start
+Description: Start or restart live FFT scanning
+Request Body:
+{
+  "center_freq_hz": 915000000,
+  "sample_rate_sps": 10000000,
+  "fft_size": 2048,
+  "fps": 15.0
+}
+Response:
+{
+  "ok": true
+}
+
+POST /live/stop
+Description: Stop live FFT scanning
+Response:
+{
+  "ok": true,
+  "status": {
+    "scan_running": false,
+    "mode": "manual",
+    ...
+  }
+}
+
+POST /live/live/start
+Description: Alternative endpoint for starting live scan (same as /live/start)
+Request Body: Same as /live/start
+Response: Same as /live/start
+
+1.4 SDR Configuration
+--------------------
+
+POST /live/sdr/config
+Description: Apply SDR configuration
+Request Body:
+{
+  "center_freq_hz": 915000000,
+  "sample_rate_sps": 10000000,
+  "gain_mode": "manual" | "agc",
+  "gain_db": 55.0,
+  "rx_channel": 0,
+  "bandwidth_hz": 5000000 | null
+}
+Response (success):
+{
+  "ok": true,
+  "config": {
+    "center_freq_hz": 915000000,
+    "sample_rate_sps": 10000000,
+    "gain_mode": "manual",
+    "gain_db": 55.0,
+    "rx_channel": 0,
+    "bandwidth_hz": 5000000
+  },
+  "note": "gain updated live" | "scan restarted with new tuning" | null
+}
+Response (error):
+{
+  "ok": false,
+  "error": "SDR locked in TASKED mode" | "gain_update_failed" | "apply_config_failed",
+  "detail": "error message"
+}
+
+GET /live/sdr/info
+Description: Get current SDR information
+Response:
+{
+  "connected": true,
+  "driver": "soapy_bladerf",
+  "rx_channels": 1,
+  "supports_agc": false,
+  "current_config": {
+    "center_freq_hz": 915000000,
+    "sample_rate_sps": 10000000,
+    "gain_mode": "manual",
+    "gain_db": 55.0,
+    "rx_channel": 0,
+    "bandwidth_hz": 5000000
+  },
+  "device": {
+    "label": "bladeRF 2.0 micro xA4",
+    "serial": "ABC123",
+    ...
+  }
+}
+
+1.5 Operator Mode Control
+--------------------------
+
+GET /live/mode
+Description: Get current operator mode
+Response:
+{
+  "mode": "manual" | "armed" | "tasked"
+}
+
+POST /live/mode/set
+Description: Set operator mode
+Request Body:
+{
+  "mode": "manual" | "armed"
+}
+Response (success):
+{
+  "ok": true,
+  "mode": "manual" | "armed"
+}
+Response (error):
+{
+  "ok": false,
+  "error": "mode_not_operator_settable",
+  "allowed": ["manual", "armed"]
+}
+
+GET /api/edge/mode
+Description: Alternative endpoint for getting mode
+Response:
+{
+  "mode": "manual" | "armed" | "tasked"
+}
+
+POST /api/edge/mode/{mode}
+Description: Alternative endpoint for setting mode
+Path Parameters:
+  - mode: "manual" | "armed"
+Response (success):
+{
+  "ok": true,
+  "mode": "manual" | "armed"
+}
+Response (error):
+{
+  "ok": false,
+  "error": "mode must be manual|armed"
+}
+
+1.6 Auto-Capture Policy
+------------------------
+
+GET /live/auto/policy
+Description: Get current auto-capture policy settings
+Response:
+{
+  "enabled": true,
+  "min_confidence": 0.90,
+  "global_cooldown_s": 3.0,
+  "per_node_cooldown_s": 2.0,
+  "per_freq_cooldown_s": 8.0,
+  "freq_bin_hz": 100000,
+  "max_captures_per_min": 10
+}
+
+POST /live/auto/policy
+Description: Update auto-capture policy settings
+Request Body (all fields optional):
+{
+  "enabled": true | false,
+  "min_confidence": 0.90,
+  "global_cooldown_s": 3.0,
+  "per_node_cooldown_s": 2.0,
+  "per_freq_cooldown_s": 8.0,
+  "freq_bin_hz": 100000,
+  "max_captures_per_min": 10
+}
+Response:
+{
+  "ok": true,
+  "auto_policy": {
+    "enabled": true,
+    "min_confidence": 0.90,
+    ...
+  }
+}
+
+1.7 Capture Management
+------------------------
+
+POST /api/capture/start
+Description: Initiate manual capture
+Request Body:
+{
+  "reason": "manual",
+  "freq_hz": 915000000.0,
+  "sample_rate_sps": 10000000,  // optional, defaults to current SDR config
+  "bandwidth_hz": 5000000,      // optional
+  "gain_mode": "manual",        // optional
+  "gain_db": 55.0,              // optional
+  "rx_channel": 0,              // optional, default 0
+  "duration_s": 5.0,            // optional, default 5.0
+  "source_node": "tripwire-01", // optional
+  "scan_plan": "fhss_track",    // optional
+  "classification": "drone_control" // optional
+}
+Response (success):
+{
+  "accepted": true,
+  "action": "capture_started"
+}
+Response (queue full):
+{
+  "accepted": false,
+  "action": "queue_full"
+}
+
+GET /live/captures
+Description: List recent captures
+Query Parameters:
+  - limit: int (default: 50) - Maximum number of captures to return
+Response:
+{
+  "captures": [
+    {
+      "ts": 1234567890.0,
+      "freq_hz": 915000000.0,
+      "reason": "manual" | "tripwire_armed",
+      "source_node": "tripwire-01" | null,
+      "duration_s": 5.0,
+      "sample_rate_sps": 10000000,
+      "status": "complete" | "failed" | "in_progress",
+      "artifact_path": "data/artifacts/captures/YYYYMMDD_HHMMSS_...",
+      ...
+    },
+    ...
+  ]
+}
+
+GET /live/api/captures
+Description: Alternative endpoint for listing captures (same as /live/captures)
+Query Parameters: Same as /live/captures
+Response: Same as /live/captures
+
+1.8 Tripwire Integration
+-------------------------
+
+POST /api/tripwire/event
+Description: Receive Tripwire detection event
+Request Body:
+{
+  "schema": "spear.tripwire.event.v1",
+  "type": "rf_cue" | "fhss_cluster" | "confirmed_event" | "heartbeat",
+  "stage": "energy" | "cue" | "confirmed",
+  "node_id": "tripwire-01",
+  "freq_hz": 915000000.0,
+  "bandwidth_hz": 2000000.0,    // optional
+  "confidence": 0.95,
+  "classification": "drone_control", // optional
+  "scan_plan": "fhss_track",     // optional
+  "timestamp": 1234567890.0,
+  "delta_db": 15.5,              // optional
+  "level_db": -45.0,             // optional
+  "callsign": "Tripwire-01",     // optional
+  "confidence_source": "ml_model", // optional
+  "hypothesis": "FHSS pattern detected", // optional
+  "remarks": "Additional context" // optional
+}
+Response (accepted, manual mode):
+{
+  "accepted": true,
+  "action": "queued_for_operator"
+}
+Response (accepted, armed mode, policy allows):
+{
+  "accepted": true,
+  "action": "auto_capture_started"
+}
+Response (accepted, armed mode, policy rejects):
+{
+  "accepted": true,
+  "action": "rejected",
+  "reason": "cue_only" | "stage_not_confirmed_<stage>" | "low_confidence" |
+            "awareness_only" | "global_cooldown" | "node_cooldown" |
+            "freq_cooldown" | "rate_limited" | "queue_full"
+}
+Response (error, invalid request):
+{
+  "accepted": false,
+  "action": "invalid_freq",
+  "reason": "freq_hz missing or invalid"
+}
+
+POST /api/tripwire/cue
+Description: Legacy endpoint (same as /api/tripwire/event)
+Request Body: Same as /api/tripwire/event
+Response: Same as /api/tripwire/event
+
+GET /api/tripwire/ping
+Description: Ping endpoint for connectivity check
+Response:
+{
+  "ok": true
+}
+
+POST /api/tripwire/scan-plan
+Description: Send scan plan command to a specific Tripwire node
+Request Body:
+{
+  "node_id": "tripwire-01",
+  "scan_plan": "fhss_track"
+}
+Response (success):
+{
+  "ok": true,
+  "node_id": "tripwire-01",
+  "scan_plan": "fhss_track"
+}
+Response (error):
+{
+  "ok": false,
+  "error": "missing_fields" | "no_connections" | "node_not_connected" | "send_failed",
+  "detail": "error message"
+}
+
+================================================================================
+2. WEBSOCKET ENDPOINTS
+================================================================================
+
+2.1 Live FFT WebSocket
+-----------------------
+
+Endpoint: ws://<jetson_ip>:8000/ws/live_fft
+Protocol: Binary frames with structured header
+Purpose: Real-time spectrum data (FFT frames) for waterfall visualization
+
+Connection Flow:
+1. Client connects to WebSocket endpoint
+2. Server sends hello message (JSON):
+   {
+     "type": "hello",
+     "proto": 1,
+     "binary": true
+   }
+3. Server sends binary frames continuously
+
+Frame Format:
+- Header: 32 bytes (struct format: "<4sBBHIqIff")
+  * Magic: "SPRF" (4 bytes)
+  * Version: 1 (1 byte)
+  * Flags: bitfield (1 byte)
+    - 0x01: FLAG_HAS_INST (has instantaneous power)
+  * Header length: 32 (2 bytes)
+  * FFT size: 2048 (4 bytes)
+  * Center frequency (Hz): int64
+  * Sample rate (sps): uint32
+  * Timestamp: float32
+  * Noise floor (dBFS): float32
+- Payload: FFT bins as float32 array
+  * power_dbfs: float32[fft_size] - Max-hold power spectrum
+  * power_inst_dbfs: float32[fft_size] - Instantaneous power (if FLAG_HAS_INST)
+  * freqs_hz: float32[fft_size] - Frequency bin centers (optional, may be omitted)
+
+Frame Size Calculation:
+- Header: 32 bytes
+- power_dbfs: fft_size * 4 bytes
+- power_inst_dbfs: fft_size * 4 bytes (if FLAG_HAS_INST)
+- Total: 32 + (fft_size * 4) + (fft_size * 4 if instant) bytes
+
+Example (fft_size=2048, with instant):
+- Header: 32 bytes
+- power_dbfs: 8192 bytes
+- power_inst_dbfs: 8192 bytes
+- Total: 16416 bytes per frame
+
+Update Rate: ~30 FPS (configurable via fps parameter in /live/start)
+
+2.2 Events WebSocket
+--------------------
+
+Endpoint: ws://<jetson_ip>:8000/ws/notify
+Protocol: JSON messages
+Purpose: UI event notifications (capture status, Tripwire cues, mode changes, etc.)
+
+Connection Flow:
+1. Client connects to WebSocket endpoint
+2. Server accepts connection
+3. Server subscribes to event bus topics
+4. Server sends JSON messages as events occur
+
+Message Format:
+{
+  "type": "tripwire_cue" | "tripwire_nodes" | "tripwire_auto_reject" |
+          "edge_mode" | "task_update" | "capture_start" |
+          "capture_progress" | "capture_complete",
+  "payload": {
+    // Event-specific payload (see below)
+  },
+  "ts": 1234567890.0  // Timestamp (optional)
+}
+
+Event Types and Payloads:
+
+tripwire_cue:
+{
+  "type": "tripwire_cue",
+  "payload": {
+    "schema": "spear.tripwire.event.v1",
+    "type": "rf_cue" | "fhss_cluster" | "confirmed_event",
+    "stage": "energy" | "cue" | "confirmed",
+    "node_id": "tripwire-01",
+    "freq_hz": 915000000.0,
+    "confidence": 0.95,
+    "classification": "drone_control",
+    "scan_plan": "fhss_track",
+    "timestamp": 1234567890.0,
+    ...
+  },
+  "ts": 1234567890.0
+}
+
+tripwire_nodes:
+{
+  "type": "tripwire_nodes",
+  "payload": {
+    "nodes": {
+      "tripwire-01": {
+        "node_id": "tripwire-01",
+        "callsign": "Tripwire-01",
+        "connected": true,
+        "last_seen": 1234567890.0,
+        "ws_last_seen": 1234567890.0,
+        ...
+      },
+      ...
+    }
+  },
+  "ts": 1234567890.0
+}
+
+tripwire_auto_reject:
+{
+  "type": "tripwire_auto_reject",
+  "payload": {
+    "cue": {
+      // Full Tripwire event payload
+    },
+    "reason": "cue_only" | "stage_not_confirmed_<stage>" | "low_confidence" | ...
+  },
+  "ts": 1234567890.0
+}
+
+edge_mode:
+{
+  "type": "edge_mode",
+  "payload": {
+    "mode": "manual" | "armed" | "tasked"
+  },
+  "ts": 1234567890.0
+}
+
+capture_start:
+{
+  "type": "capture_start",
+  "payload": {
+    "freq_hz": 915000000.0,
+    "sample_rate_sps": 10000000,
+    "duration_s": 5.0,
+    "reason": "manual" | "tripwire_armed",
+    "source_node": "tripwire-01" | null,
+    "ts": 1234567890.0
+  },
+  "ts": 1234567890.0
+}
+
+capture_progress:
+{
+  "type": "capture_progress",
+  "payload": {
+    "progress_pct": 45.0
+  },
+  "ts": 1234567890.0
+}
+
+capture_complete:
+{
+  "type": "capture_complete",
+  "payload": {
+    "freq_hz": 915000000.0,
+    "duration_s": 5.0,
+    "status": "complete" | "failed",
+    "ts": 1234567890.0
+  },
+  "ts": 1234567890.0
+}
+
+2.3 Tripwire Link WebSocket
+----------------------------
+
+Endpoint: ws://<jetson_ip>:8000/ws/tripwire
+Alternative: ws://<jetson_ip>:8000/ws/tripwire_link
+Protocol: JSON messages (bidirectional)
+Purpose: Tripwire node connection, status, and control
+
+Connection Flow:
+1. Tripwire node connects to WebSocket endpoint
+2. Tripwire MUST send "hello" message within 5 seconds
+3. Edge sends "edge_state" message
+4. Tripwire sends periodic "heartbeat" messages (every 2-4 seconds)
+5. Optional: Tripwire sends "status" messages for updates
+6. Optional: Edge sends "set_scan_plan" commands
+
+Message Types (Tripwire → Edge):
+
+hello (REQUIRED - First Message):
+{
+  "type": "hello",
+  "node_id": "tripwire-01",           // REQUIRED
+  "callsign": "Tripwire-01",          // optional
+  "gps": {                            // optional
+    "gps_lat": 37.7749,
+    "gps_lon": -122.4194,
+    "gps_alt_ft": 100.0
+  },
+  "system_time": 1234567890.0,       // optional
+  "meta": {                           // optional
+    "sdr_driver": "soapy_bladerf",
+    "sdr": "bladeRF 2.0 micro xA4",
+    "version": "1.0.0"
+  }
+}
+
+heartbeat (REQUIRED - Periodic):
+{
+  "type": "heartbeat"
+}
+
+status (Optional):
+{
+  "type": "status",
+  "scan_plan": "fhss_track",
+  "sdr_status": {...},               // optional
+  "gps": {...},                      // optional
+  // ... any other status fields
+}
+
+Message Types (Edge → Tripwire):
+
+edge_state (Sent after hello):
+{
+  "type": "edge_state",
+  "mode": "manual" | "armed" | "tasked"
+}
+
+set_scan_plan:
+{
+  "type": "set_scan_plan",
+  "scan_plan": "fhss_track"
+}
+
+Connection Requirements:
+- Hello message MUST be sent within 5 seconds of connection
+- Heartbeat messages MUST be sent every 2-4 seconds (recommended)
+- Edge considers node "connected" if:
+  * WebSocket connection is established AND
+  * Last heartbeat received within 5 seconds
+- Edge will close connection with code 1008 (Policy Violation) if:
+  * No hello received within 5 seconds
+  * Invalid JSON in hello message
+  * First message is not "hello"
+  * Missing "node_id" in hello
+
+================================================================================
+3. ERROR RESPONSES
+================================================================================
+
+All endpoints may return standard HTTP error codes:
+- 200: Success
+- 400: Bad Request (invalid parameters)
+- 404: Not Found (endpoint doesn't exist)
+- 500: Internal Server Error
+
+Error Response Format:
+{
+  "ok": false,
+  "error": "error_code",
+  "detail": "Human-readable error message"
+}
+
+Common Error Codes:
+- "mode_not_operator_settable": Mode cannot be set by operator
+- "SDR locked in TASKED mode": SDR configuration locked during capture
+- "gain_update_failed": Failed to update gain settings
+- "apply_config_failed": Failed to apply SDR configuration
+- "invalid_freq": Frequency missing or invalid
+- "missing_fields": Required fields missing in request
+- "no_connections": No Tripwire connections available
+- "node_not_connected": Specified Tripwire node not connected
+- "send_failed": Failed to send message to Tripwire node
+- "queue_full": Capture queue is full
+
+================================================================================
+4. REQUEST/RESPONSE EXAMPLES
+================================================================================
+
+4.1 Start Live Scan
+-------------------
+
+Request:
+POST /live/start
+Content-Type: application/json
+
+{
+  "center_freq_hz": 915000000,
+  "sample_rate_sps": 10000000,
+  "fft_size": 2048,
+  "fps": 30.0
+}
+
+Response:
+{
+  "ok": true
+}
+
+4.2 Manual Capture
+-------------------
+
+Request:
+POST /api/capture/start
+Content-Type: application/json
+
+{
+  "freq_hz": 915000000.0,
+  "sample_rate_sps": 10000000,
+  "bandwidth_hz": 5000000,
+  "gain_mode": "manual",
+  "gain_db": 55.0,
+  "duration_s": 5.0
+}
+
+Response:
+{
+  "accepted": true,
+  "action": "capture_started"
+}
+
+4.3 Tripwire Event
+-------------------
+
+Request:
+POST /api/tripwire/event
+Content-Type: application/json
+
+{
+  "schema": "spear.tripwire.event.v1",
+  "type": "confirmed_event",
+  "stage": "confirmed",
+  "node_id": "tripwire-01",
+  "freq_hz": 915000000.0,
+  "bandwidth_hz": 2000000.0,
+  "confidence": 0.95,
+  "classification": "drone_control",
+  "scan_plan": "fhss_track",
+  "timestamp": 1234567890.0,
+  "delta_db": 15.5,
+  "level_db": -45.0
+}
+
+Response (Armed Mode, Policy Allows):
+{
+  "accepted": true,
+  "action": "auto_capture_started"
+}
+
+Response (Armed Mode, Policy Rejects):
+{
+  "accepted": true,
+  "action": "rejected",
+  "reason": "low_confidence"
+}
+
+Response (Manual Mode):
+{
+  "accepted": true,
+  "action": "queued_for_operator"
+}
+
+4.4 Set Operator Mode
+---------------------
+
+Request:
+POST /api/edge/mode/armed
+Content-Type: application/json
+
+Response:
+{
+  "ok": true,
+  "mode": "armed"
+}
+
+4.5 Get Auto-Capture Policy
+-----------------------------
+
+Request:
+GET /live/auto/policy
+
+Response:
+{
+  "enabled": true,
+  "min_confidence": 0.90,
+  "global_cooldown_s": 3.0,
+  "per_node_cooldown_s": 2.0,
+  "per_freq_cooldown_s": 8.0,
+  "freq_bin_hz": 100000,
+  "max_captures_per_min": 10
+}
+
+================================================================================
+5. API USAGE NOTES
+================================================================================
+
+5.1 CORS
+--------
+All endpoints support CORS with:
+- allow_origins: ["*"]
+- allow_methods: ["*"]
+- allow_headers: ["*"]
+
+5.2 Content-Type
+----------------
+- All POST requests should use: Content-Type: application/json
+- All responses are JSON: Content-Type: application/json
+
+5.3 Authentication
+------------------
+Currently, no authentication is required. All endpoints are publicly accessible.
+
+5.4 Rate Limiting
+-----------------
+- Capture queue: Maximum 8 concurrent captures
+- Auto-capture rate limit: Maximum 10 captures per minute (configurable)
+- Cooldown periods: Global (3.0s), per-node (2.0s), per-frequency (8.0s)
+
+5.5 WebSocket Reconnection
+---------------------------
+- Clients should implement automatic reconnection logic
+- WebSocket connections may be closed by server on errors
+- Clients should handle WebSocketDisconnect exceptions gracefully
+
+5.6 Error Handling
+------------------
+- Always check "ok" or "accepted" field in responses
+- Check "error" or "reason" fields for error details
+- HTTP status codes provide additional error context
+- WebSocket errors are sent as JSON messages before connection close
+
+================================================================================
+6. API VERSIONING
+================================================================================
+
+Current API Version: 1.0
+
+Future versions may introduce:
+- Version prefix in URLs (e.g., /api/v1/capture/start)
+- Deprecation warnings in responses
+- Breaking changes documented in CHANGELOG.txt
+
+================================================================================
+END OF API REFERENCE
+================================================================================
+
+
+
+

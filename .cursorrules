@@ -1,0 +1,198 @@
+# SPEAR-Edge Project Rules
+
+## Project Overview
+SPEAR-Edge is a Software Defined Radio (SDR) based RF monitoring and capture system designed for the Jetson Orin Nano. It provides real-time FFT/waterfall visualization, automated signal capture, and integration with Tripwire nodes.
+
+## Key Technologies
+- **Backend**: Python 3.10+, FastAPI, asyncio
+- **Frontend**: Vanilla JavaScript (no frameworks), Canvas API for FFT/waterfall
+- **SDR**: SoapySDR with bladeRF2 (xA4/xA9) support
+- **Hardware**: Jetson Orin Nano, bladeRF 2.0 micro
+- **Data Processing**: NumPy for FFT, IQ processing
+
+## Critical Hardware Constraints
+
+### bladeRF Stream Lifecycle
+**CRITICAL**: bladeRF requires a specific order for stream operations:
+1. Set sample rate FIRST
+2. Set bandwidth
+3. Set frequency
+4. Enable RX channel
+5. **ONLY THEN** create and activate stream
+
+**NEVER** activate stream before RF parameters are set. The stream must be created/activated AFTER all RF settings.
+
+**Example** (from `soapy.py`):
+```python
+# bladeRF REQUIRED ORDER
+self.dev.setSampleRate(SOAPY_SDR_RX, ch, float(self.sample_rate_sps))
+self.dev.setBandwidth(SOAPY_SDR_RX, ch, float(self.bandwidth_hz))
+self.dev.setFrequency(SOAPY_SDR_RX, ch, float(self.center_freq_hz))
+# Enable RX
+self.dev.writeSetting("ENABLE_CHANNEL", "RX", "true")
+# STREAM SETUP MUST HAPPEN LAST
+self._setup_stream()
+```
+
+### bladeRF Read Sizes
+- **ALWAYS** use power-of-two read sizes (8192, 16384, etc.)
+- **NEVER** use arbitrary sizes - causes buffer timeouts
+- Use `BLADE_RF_READ_SAMPLES = 8192` constant for consistency
+
+### Sample Rate Limits
+- Jetson Orin Nano can handle up to ~30 MS/s with proper optimization
+- Use decimation for higher rates
+- Ring buffer size: `int(sample_rate_sps * 0.5)` (0.5 seconds of buffering)
+
+## Code Organization
+
+### Backend Structure
+```
+spear_edge/
+├── api/              # HTTP and WebSocket endpoints
+│   ├── http/         # REST API routes
+│   └── ws/           # WebSocket handlers
+├── core/
+│   ├── orchestrator/  # Main orchestrator (SDR lifecycle)
+│   ├── sdr/          # SDR drivers (soapy.py, base.py)
+│   ├── scan/         # FFT processing (scan_task.py, rx_task.py)
+│   ├── capture/      # Capture management
+│   ├── bus/          # Event bus (pub/sub)
+│   └── classify/     # ML classification (stub)
+└── ui/web/           # Frontend (HTML, CSS, JS)
+```
+
+### Frontend Structure
+- `app.js`: Main application logic, WebSocket handling, FFT/waterfall rendering
+- `index.html`: UI structure
+- `styles.css`: Styling (green theme)
+
+## Async Patterns
+
+### Always Use Async for Blocking Operations
+- SDR `read_samples()` is blocking - use `asyncio.to_thread()`
+- Never call blocking SDR operations directly in async functions
+- Example:
+```python
+iq = await asyncio.to_thread(self.sdr.read_samples, BLADE_RF_READ_SAMPLES)
+```
+
+### Event Loop Considerations
+- Always yield to event loop: `await asyncio.sleep(0.001)` in tight loops
+- Use `asyncio.Lock()` for shared resource protection (SDR access)
+- Never block the event loop with CPU-intensive work
+
+## FFT and Waterfall Rendering
+
+### Frontend Rendering
+- Use `requestAnimationFrame` for smooth rendering
+- Canvas uses device pixel ratio: `canvas.width / dpr`
+- FFT line: uses `power_dbfs` (max-hold or instant)
+- Waterfall: uses `power_inst_dbfs` (instant power)
+- Display range: Fixed -90 to -20 dBFS (no auto-leveling)
+
+### Backend FFT Processing
+- Use Hanning window for FFT
+- Normalize by window energy for stable scaling
+- Max-hold: 0.35s reset window (for FHSS visibility)
+- Noise floor: 10th percentile
+- FPS: Default 30 (configurable)
+
+## Capture System
+
+### Manual Captures
+- Use ALL SDR control settings (freq, sample_rate, bandwidth, gain, etc.)
+- Store extra metadata in `CaptureRequest.meta` field
+- Duration: Default 5 seconds
+
+### Armed Mode Captures
+- Triggered by Tripwire cues via `/api/tripwire/event`
+- Payload includes: `freq_hz`, `bandwidth_hz`, `node_id`, `scan_plan`, `classification`, `confidence`
+- Payload does NOT include: `sample_rate_sps`, `duration_s` (use defaults)
+- Priority: 60 (higher than manual captures)
+
+### Capture Execution
+- Pause live scan during capture
+- Tune SDR to capture frequency
+- Apply bandwidth and gain from request metadata
+- Use bladeRF-safe read size (8192)
+- Resume live scan after capture completes
+
+## WebSocket Protocols
+
+### Live FFT WebSocket (`/ws/live_fft`)
+- Sends JSON frames with: `power_dbfs`, `power_inst_dbfs`, `freqs_hz`, `noise_floor_dbfs`
+- Frontend expects: `power_dbfs` (FFT line), `power_inst_dbfs` (waterfall)
+- Compatibility shim handles alternate field names (`power_db`, `power`, etc.)
+
+### Notify WebSocket (`/ws/notify`)
+- Sends: `tripwire_cue`, `edge_mode`, `tripwire_nodes`, `tripwire_auto_reject`
+- Used for UI updates (cues, mode changes, node status)
+
+## Error Handling
+
+### Never Crash Runtime
+- Live FFT processing must never crash - catch all exceptions
+- SDR operations should fail gracefully
+- WebSocket handlers must handle disconnects cleanly
+
+### Logging
+- Use descriptive prefixes: `[CAPTURE]`, `[ORCH]`, `[SCAN]`, `[RX]`, `[FFT WS]`
+- Log important state changes and errors
+- Avoid excessive logging in tight loops
+
+## Performance Optimization
+
+### Jetson Orin Nano Considerations
+- Use NumPy operations (vectorized)
+- Minimize Python object allocations
+- Use `np.complex64` for IQ data (not complex128)
+- Ring buffer is thread-safe (uses threading.Lock)
+- GPU FFT is available but not currently used
+
+### Frontend Optimization
+- Use offscreen canvas for waterfall scrolling
+- Cache grid/axis drawing
+- Drop frames if rendering falls behind
+- Throttle logging (every 2 seconds for frame keys)
+
+## Testing and Debugging
+
+### Common Issues
+1. **Stream returns 0 samples**: Stream not activated, wrong read size, stream deactivated
+2. **Sample rate reverts to 4 MHz**: Stream activated before RF parameters set
+3. **UI freezing**: Blocking operations in event loop, too high sample rate
+4. **Waterfall not scrolling**: Canvas coordinate system mismatch
+5. **FFT not rendering**: Missing field names, WebSocket not connected
+
+### Debugging Tips
+- Check stream state: `sdr.rx_stream is None`
+- Verify read sizes are power-of-two
+- Check WebSocket connection status in browser console
+- Look for `[ERROR]` or `[WARNING]` prefixes in logs
+
+## Code Style
+
+### Python
+- Use type hints where possible
+- Use dataclasses for data models (`@dataclass(frozen=True)`)
+- Async functions should be clearly named
+- Use descriptive variable names
+
+### JavaScript
+- Use `const` for constants, `let` for variables
+- Use arrow functions for callbacks
+- Cache DOM references at module level
+- Use descriptive console.log prefixes
+
+## File Naming
+- Python files: `snake_case.py`
+- JavaScript files: `camelCase.js` or `kebab-case.js`
+- HTML/CSS: `kebab-case.html`, `kebab-case.css`
+
+## Important Notes
+- **DO NOT** modify files in `/home/spear/tripwire ref/` (reference only)
+- Always verify bladeRF stream lifecycle order
+- Test with real hardware (Jetson Orin Nano + bladeRF)
+- Consider performance impact on Jetson (limited CPU/RAM)
+

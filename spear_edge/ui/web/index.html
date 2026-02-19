@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SPEAR-Edge</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Main stylesheet -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+
+  <!-- =========================================================
+       TOP STATUS / CONTROL BAR
+       ========================================================= -->
+  <header id="top-bar">
+
+    <!-- LEFT: TITLE -->
+    <div id="title">
+      SPEAR-EDGE
+    </div>
+
+    <!-- RIGHT: STATUS + CONTROLS -->
+    <div id="topRightCluster">
+
+      <!-- MODE INDICATOR -->
+      <div id="modePill" class="mode-pill manual">
+        MODE: MANUAL
+      </div>
+
+      <!-- STATUS LED BLOCK -->
+      <div id="statusBlock">
+        <div class="status-item">
+          <div class="led" id="wsLed"></div>
+          <span>Link</span>
+        </div>
+        <div class="status-item">
+          <div class="led" id="sdrLed"></div>
+          <span>SDR</span>
+        </div>
+        <div class="status-item">
+          <div class="led" id="gpsLed"></div>
+          <span>GPS</span>
+        </div>
+        <div class="status-item">
+          <div class="led" id="takLed"></div>
+          <span>TAK</span>
+        </div>
+      </div>
+
+      <!-- START / STOP CONTROLS -->
+      <div class="controls">
+        <button id="start">Start Live</button>
+        <button id="stop">Stop</button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- =========================================================
+       MAIN LAYOUT (3 COLUMNS)
+       ========================================================= -->
+  <div id="main-layout">
+
+    <!-- ===================== LEFT COLUMN ===================== -->
+    <div id="leftColumn">
+
+      <!-- SDR HEALTH PANEL -->
+      <div class="panel" id="sdrHealthPanel">
+        <div class="panel-header">
+          SDR HEALTH
+          <button id="sdrHealthStatus" class="health-status-btn good">GOOD</button>
+        </div>
+        <div class="panel-body" id="sdrHealthBody">
+          <div class="health-metric">
+            <span class="health-label">SUCCESS RATE:</span>
+            <span class="health-value" id="healthSuccessRate">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">THROUGHPUT:</span>
+            <span class="health-value" id="healthThroughput">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">SAMPLES/SEC:</span>
+            <span class="health-value" id="healthSamplesSec">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">AVG READ TIME:</span>
+            <span class="health-value" id="healthAvgReadTime">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">ERRORS:</span>
+            <span class="health-value" id="healthErrors">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">READS:</span>
+            <span class="health-value" id="healthReads">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">STREAM:</span>
+            <span class="health-value" id="healthStream">—</span>
+          </div>
+          <div class="health-metric">
+            <span class="health-label">USB SPEED:</span>
+            <span class="health-value" id="healthUsbSpeed">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">SDR Controls</div>
+        
+        <!-- SDR STATUS (READ-ONLY) -->
+        <div class="sdr-status">
+          <div><strong>SDR:</strong> <span id="sdr-driver">—</span></div>
+          <div><strong>Center:</strong> <span id="sdr-center">—</span></div>
+          <div><strong>Rate:</strong> <span id="sdr-rate">—</span></div>
+          <div><strong>Gain:</strong> <span id="sdr-gain">—</span></div>
+          <div><strong>Mode:</strong> <span id="sdr-gain-mode">—</span></div>
+        </div>
+
+        <div class="form-grid">
+          <label>
+            Center Frequency (MHz)
+            <input type="number" id="freqInput" value="915.000" step="0.001">
+          </label>
+
+          <label>
+            Sample Rate (MS/s)
+            <input type="number" id="rateInput" value="2.0" step="0.1">
+          </label>
+
+          <label>
+            Bandwidth (MHz)
+            <input type="number" id="bandwidthInput" value="" step="0.1" placeholder="Auto">
+          </label>
+
+          <label>
+            FFT Size
+            <select id="fftSizeSelect">
+              <option value="512">512</option>
+              <option value="1024" selected>1024</option>
+              <option value="2048">2048</option>
+              <option value="4096">4096</option>
+            </select>
+          </label>
+
+          <label>
+            Gain Mode
+            <select id="gainModeSelect">
+              <option value="manual" selected>Manual</option>
+              <option value="agc">AGC</option>
+            </select>
+          </label>
+
+          <label>
+            FPS
+            <select id="fpsSelect">
+              <option value="15">15</option>
+              <option value="30" selected>30</option>
+              <option value="60">60</option>
+            </select>
+          </label>
+
+          <label style="grid-column: 1 / -1;">
+            Gain (dB)
+            <input type="range" id="gainSlider" min="0" max="70" value="30">
+          </label>
+
+          <label>
+            Waterfall Brightness
+            <input type="range" id="wfBrightnessSlider" min="-50" max="50" value="0" step="1">
+            <span id="wfBrightnessValue" style="font-size: 11px; color: var(--text-muted);">0</span>
+          </label>
+
+          <label>
+            Waterfall Contrast
+            <input type="range" id="wfContrastSlider" min="0.1" max="3.0" value="1.0" step="0.1">
+            <span id="wfContrastValue" style="font-size: 11px; color: var(--text-muted);">1.0</span>
+          </label>
+
+          <div class="btn-row">
+            <button id="btnApplySdr">Apply SDR Settings</button>
+            <button id="btnManualCapture">Manual Capture</button>
+          </div>
+
+          <div class="small-note">
+            In <b>TASKED</b> mode, these controls are read-only.
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ===================== CENTER COLUMN ===================== -->
+    <div id="centerColumn">
+    
+      <!-- RF SPECTRUM -->
+      <div class="panel">
+        <div class="panel-header">RF Spectrum</div>
+    
+        <!-- ARMED WARNING BANNER -->
+        <div id="armedBanner" class="armed-banner">
+          SYSTEM ARMED — Tripwire cues may trigger capture
+        </div>
+    
+        <!-- CAPTURE PROGRESS BANNER -->
+        <div id="captureBanner" class="capture-banner hidden">
+          <div class="capture-banner-text">Capture in progress please wait</div>
+          <div class="capture-progress-container">
+            <div id="captureProgressBar" class="capture-progress-bar"></div>
+          </div>
+        </div>
+    
+        <!-- TASK BANNER -->
+        <div id="taskBanner" class="task-banner hidden">
+          <div class="task-banner-title">TASKED CAPTURE</div>
+          <div class="task-banner-body">
+            <span id="taskFrom">From: -</span>
+            <span id="taskFreq">Freq: -</span>
+            <span id="taskProfile">Profile: -</span>
+          </div>
+        </div>
+    
+        <!-- FFT + WATERFALL -->
+        <div class="spectrum-container">
+          <div class="y-axis-label">dB above noise</div>
+
+          <!-- FFT + Waterfall (Canvas 2D) -->
+          <canvas id="spec"></canvas>
+        </div>
+      </div>
+      
+        <!-- BOTTOM: CUES & CAPTURES (Full width under spectrum) -->
+      <div id="bottomPanel" style="margin-top:16px; display:flex; gap:16px; flex-wrap:wrap;">
+        <!-- LEFT: CUES -->
+        <div style="flex:1; min-width:300px;">
+          <div class="panel">
+            <div class="panel-header">Tripwire Cues (Manual Review)</div>
+            <div class="panel-body" id="cueList" style="max-height:300px; overflow-y:auto;">
+              <div class="muted">No active cues…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: RECENT CAPTURES -->
+        <div style="flex:1; min-width:300px;">
+          <div class="panel">
+            <div class="panel-header">Recent Captures</div>
+            <div class="panel-body">
+              <div id="captureLog" class="capture-log" style="max-height:300px; overflow-y:auto;">
+                No captures yet
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- ===================== RIGHT COLUMN ===================== -->
+    <div id="rightColumn">
+    
+      <!-- EDGE MODE -->
+      <div class="panel">
+        <div class="panel-header">Edge Mode</div>
+        <div class="panel-body">
+          <div class="mode-buttons">
+            <button id="btnManual" class="mode-btn">MANUAL</button>
+            <button id="btnArmed" class="mode-btn">ARMED</button>
+          </div>
+          <div class="small-note" id="edgeModeLabel">Mode: unknown</div>
+        </div>
+      </div>
+      
+      <!-- TRIPWIRE NODES (DYNAMIC LIST) -->
+      <div class="panel">
+        <div class="panel-header collapsible" id="tripwireHeader">
+          <span class="caret">&#9654;</span>
+          Tripwire Nodes
+          <div id="tripwireLeds" class="tripwire-leds-collapsed"></div>
+        </div>
+        <div id="tripwireBody" class="collapse">
+          <div id="tripwireNodes" class="nodes-list">
+            <!-- Injected by JS -->
+          </div>
+          <div class="small-note">
+            Nodes identified by <code>node_id</code> (tripwire-XX)
+          </div>
+        </div>
+      </div>
+
+      <!-- TAK & INTEGRATIONS -->
+      <div class="panel" style="margin-top:12px;">
+        <div class="panel-header collapsible" id="takHeader">
+          <span class="caret">&#9654;</span>
+          TAK & Integrations
+        </div>
+        <div id="takBody" class="collapse">
+          <label>
+            TAK Server
+            <input type="text" id="takHostInput" placeholder="10.0.0.10">
+          </label>
+          <label>
+            TAK Port
+            <input type="number" id="takPortInput" value="8089">
+          </label>
+          <div class="btn-row">
+            <button id="btnTakConnect">Connect</button>
+          </div>
+          <hr class="subdivider">
+          <label>
+            Edge Callsign
+            <input type="text" id="callsignInput" placeholder="Optional">
+          </label>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- =========================================================
+       APP SCRIPT
+       ========================================================= -->
+  <script src="app.js"></script>
+
+</body>
+</html>

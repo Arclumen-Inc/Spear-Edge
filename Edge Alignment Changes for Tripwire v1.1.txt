@@ -1,0 +1,138 @@
+Edge Alignment Changes for Tripwire v1.1
+Purpose:
+This document enumerates the specific, concrete changes required on the Edge side to fully align with the current and intended behavior of Tripwire v1.1. These are not architectural rewrites; they are semantic, routing, and contract-alignment changes to ensure correctness, safety, and future scalability.
+
+1. Event Semantics and Normalization
+1.1 Normalize Event Field Names (REQUIRED)
+Current State:
+* Edge code inconsistently references type and event_type.
+* Tripwire emits type exclusively (e.g., rf_cue, fhss_cluster).
+Required Change:
+* Edge SHALL treat type as the authoritative event discriminator.
+* All references to event_type SHOULD be removed or aliased.
+Action:
+* Update all Edge handlers (ingest, orchestrator, task engine) to use:
+* ev["type"]
+
+1.2 Introduce Explicit Detection Stage Handling (REQUIRED)
+Current State:
+* Edge implicitly infers event importance from confidence alone.
+Required Change:
+* Edge SHALL recognize and respect the stage field from Tripwire:
+o energy
+o cue
+o confirmed
+Action:
+* Update event models to store stage.
+* Enforce logic such that:
+o stage == cue ? advisory only
+o stage == confirmed ? eligible for action
+
+2. Cue Handling Policy
+2.1 Explicitly Mark Cues as Non-Actionable (REQUIRED)
+Current State:
+* Cues are implicitly ignored by auto-capture due to low confidence thresholds.
+Required Change:
+* Edge SHALL explicitly block rf_cue events from triggering:
+o auto-capture
+o task creation
+o ATAK forwarding
+Action:
+Add a hard gate:
+if ev.get("type") == "rf_cue":
+    return False, "cue_only"
+This is a safety and clarity improvement, not a functional change.
+
+2.2 Cue Storage Scope (RECOMMENDED)
+Current State:
+* All cues may be ingested and forwarded through port 8000.
+Required Change:
+* Edge SHOULD treat cues as ephemeral:
+o Store only in short rolling buffers
+o Do not persist long-term
+Action:
+* Limit cue persistence to memory (ring buffer)
+* Optionally down-sample cues if ingesting via HTTP
+
+3. Port Responsibility Clarification
+3.1 Enforce Port Semantics
+PortRoleRequired Behavior8000Authoritative ingestConfirmed + lifecycle events only8080Live runtime / WSAll events including cuesRequired Change:
+* Edge SHOULD stop treating port 8000 as a real-time event bus.
+Action:
+* Filter or down-sample rf_cue events at ingest (8000)
+* Prefer direct WebSocket (8080) for live cue handling
+
+4. Confidence Interpretation Alignment
+4.1 Separate Confidence Domains (REQUIRED)
+Clarification:
+* Tripwire confidence = signal confidence
+* Edge confidence thresholds = action confidence
+Required Change:
+* Edge SHALL NOT reinterpret or renormalize Tripwire confidence values.
+Action:
+* Treat Tripwire confidence as input-only
+* Apply Edge policy thresholds independently
+
+5. Confirmed Event Handling
+5.1 Require Stage + Confidence for Action (REQUIRED)
+Required Change:
+* Edge SHALL only consider events eligible for:
+o auto-capture
+o ATAK forwarding
+if ALL are true:
+* stage == confirmed
+* confidence >= min_confidence
+Action:
+Enforce combined gate, not confidence-only gate.
+
+6. ATAK Forwarding Rules
+6.1 Explicit ATAK Eligibility Filter (REQUIRED)
+Required Change:
+* Edge SHALL forward ONLY confirmed events to ATAK.
+Action:
+if ev.get("stage") != "confirmed":
+    return
+Additional Constraints:
+* No raw RF metrics
+* Human-readable labels only
+
+7. Metadata Preservation (RECOMMENDED)
+7.1 Preserve Scan Context
+Required Change:
+* Edge SHALL preserve the following fields end-to-end:
+o scan_plan
+o confidence_source
+o classification
+o hypothesis (if present)
+These are critical for:
+* debugging
+* multi-node correlation
+* analyst review
+
+8. Documentation and Comments (REQUIRED)
+8.1 Codify Intent in Edge
+Required Change:
+* Add comments or documentation stating:
+o Cues are advisory
+o Edge is the authority
+o Tripwire does not assert intent or threat
+This prevents future misuse or regression.
+
+9. Summary of Required Changes
+MUST DO
+* Normalize type field usage
+* Add explicit stage handling
+* Hard-block cues from auto-action
+* Align ATAK forwarding rules
+SHOULD DO
+* Reduce cue persistence
+* Enforce port semantics
+* Preserve metadata
+SHOULD NOT DO
+* Infer direction, range, or intent from cues
+* Treat Tripwire confidence as action confidence
+
+10. Final Note
+These changes do not alter Edge’s architecture. They clarify intent, reduce ambiguity, and ensure that Tripwire and Edge operate as a disciplined sensing and decision stack.
+Once applied, Edge will be fully aligned with Tripwire v1.1 semantics and safe for operational use.
+

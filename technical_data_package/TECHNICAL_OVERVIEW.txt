@@ -1,0 +1,727 @@
+================================================================================
+SPEAR-EDGE TECHNICAL OVERVIEW
+================================================================================
+Document: TECHNICAL_OVERVIEW.txt
+Version: 1.0
+Date: 2025-01-XX
+Purpose: Comprehensive technical overview of the SPEAR-Edge system architecture,
+         capabilities, and integration points for developers, system integrators,
+         and technical stakeholders.
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+SPEAR-Edge is a Software Defined Radio (SDR) based RF monitoring and capture
+system designed for the NVIDIA Jetson Orin Nano platform. It provides real-time
+spectrum analysis, automated signal capture, machine learning-based signal
+classification, and integration with distributed Tripwire sensor nodes and the
+Android Team Awareness Kit (ATAK).
+
+Key Capabilities:
+- Real-time FFT/waterfall visualization with 30 FPS updates
+- Manual and automatic RF signal capture with full metadata
+- Memory-efficient capture pipeline (streams IQ data to disk)
+- ML-ready signal classification pipeline (ONNX Runtime)
+- Tripwire node integration via WebSocket and HTTP
+- ATAK integration via CoT (Cursor on Target) protocol
+- Web-based user interface for monitoring and control
+- Quality metrics and signal triage for capture validation
+
+Target Platform:
+- Hardware: NVIDIA Jetson Orin Nano Developer Kit
+- SDR Devices: bladeRF 2.0 micro (xA4/xA9), ANT SDR E200 (AD9361)
+- Operating System: Linux (Jetson Linux)
+- Python: 3.10+
+- Key Libraries: FastAPI, SoapySDR, NumPy, ONNX Runtime
+
+================================================================================
+2. SYSTEM ARCHITECTURE
+================================================================================
+
+2.1 High-Level Architecture
+
+SPEAR-Edge follows an event-driven, asynchronous architecture with clear
+separation of concerns:
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        Web UI (Browser)                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐        │
+│  │ Live FFT WS  │  │ Events WS    │  │ HTTP API     │        │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘        │
+└─────────┼──────────────────┼──────────────────┼────────────────┘
+           │                  │                  │
+           ▼                  ▼                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    FastAPI Application                         │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │              Orchestrator (Core Runtime)                 │ │
+│  │  - Mode Management (manual/armed/tasked)                  │ │
+│  │  - SDR Lifecycle Control                                  │ │
+│  │  - Auto-Capture Policy Engine                             │ │
+│  │  - Event Bus (Pub/Sub)                                    │ │
+│  └──────────────┬───────────────────────────┬────────────────┘ │
+│                 │                           │                   │
+│  ┌──────────────▼──────────┐  ┌────────────▼──────────────┐  │
+│  │   Capture Manager        │  │   Scan Task (FFT)         │  │
+│  │   - Queue Management     │  │   - IQ Processing         │  │
+│  │   - Artifact Generation  │  │   - FFT Computation       │  │
+│  │   - ML Classification    │  │   - Power Normalization   │  │
+│  └──────────────┬───────────┘  └────────────┬──────────────┘  │
+│                 │                           │                   │
+│  ┌──────────────▼───────────────────────────▼──────────────┐  │
+│  │              SDR Layer (SoapySDR)                        │ │
+│  │  - Hardware Abstraction                                   │ │
+│  │  - Stream Management                                      │ │
+│  │  - RF Parameter Control                                   │ │
+│  └──────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+           │                           │
+           ▼                           ▼
+    ┌─────────────┐            ┌──────────────┐
+    │  bladeRF    │            │  Tripwire    │
+    │  Hardware   │            │  Nodes       │
+    └─────────────┘            └──────────────┘
+
+2.2 Core Components
+
+Orchestrator (orchestrator.py):
+- Central runtime owner of SDR hardware
+- Manages operator modes: manual, armed, tasked
+- Coordinates scan lifecycle and capture queue
+- Publishes live FFT frames via event bus
+- Implements auto-capture policy and rate limiting
+- Handles Tripwire node registration and status
+
+Capture Manager (capture_manager.py):
+- Owns capture queue (max 8 concurrent)
+- Executes capture jobs asynchronously
+- Generates spectrograms, features, and metadata
+- Writes structured capture artifacts to disk
+- Integrates ML classification pipeline
+- Implements memory-efficient streaming capture
+
+SDR Layer (sdr/soapy.py):
+- SoapySDR abstraction for hardware control
+- bladeRF-specific stream lifecycle management
+- RF parameter control (frequency, sample rate, bandwidth, gain)
+- Ring buffer for continuous IQ streaming
+- Thread-safe sample reading
+
+Scan Task (scan/scan_task.py):
+- Consumes IQ from ring buffer
+- Produces stable FFT frames at fixed FPS (default 30)
+- Normalized power scaling for ML compatibility
+- Max-hold tracking for FHSS visibility
+- Noise floor estimation
+
+Event Bus (bus/):
+- Pub/sub event system for inter-component communication
+- Topics: live_spectrum, capture_start, capture_result, tripwire_cue, etc.
+- Async queue-based message delivery
+- Type-safe event models
+
+2.3 Data Flow
+
+Live Scan Flow:
+1. SDR streams IQ samples → Ring Buffer (0.5s buffer)
+2. Scan Task reads from ring buffer → FFT computation
+3. FFT frames published to event bus → Live FFT WebSocket
+4. UI renders FFT line and waterfall in real-time
+
+Capture Flow:
+1. Capture request queued (manual or Tripwire-triggered)
+2. Live scan paused, SDR tuned to capture frequency
+3. IQ data streamed directly to disk (memory-efficient)
+4. Spectrogram computed in chunks from disk
+5. Quality metrics and triage computed
+6. ML classification (if signal present)
+7. Artifacts written: IQ, spectrogram, metadata, thumbnails
+8. Live scan resumed
+
+================================================================================
+3. OPERATOR MODES
+================================================================================
+
+3.1 Manual Mode
+- Operator has full control over SDR and captures
+- Tripwire cues are advisory only (displayed in UI, never trigger captures)
+- Manual captures via UI or REST API
+- No automatic actions
+
+3.2 Armed Mode
+- Automatic capture enabled (subject to policy)
+- Tripwire cues evaluated against auto-capture policy
+- Only confirmed events (stage="confirmed") are eligible
+- Cues (type="rf_cue") are advisory only, never actionable
+- Policy checks: confidence threshold, cooldowns, rate limits
+
+3.3 Tasked Mode
+- Internal transient state during capture execution
+- SDR is tuned to capture frequency
+- Live scan is paused
+- Automatically returns to previous mode after capture
+
+================================================================================
+4. CAPTURE SYSTEM
+================================================================================
+
+4.1 Capture Types
+
+Manual Captures:
+- Initiated by operator via UI or POST /api/capture/start
+- Full operator control over RF parameters
+- Priority: 50 (lower than auto-captures)
+- Reason: "manual"
+
+Armed Captures (Auto-Capture):
+- Triggered by Tripwire confirmed events
+- Policy-gated (confidence >= 0.90, stage="confirmed")
+- Priority: 60 (higher than manual)
+- Reason: "tripwire_armed"
+- All Tripwire metadata preserved
+
+4.2 Capture Artifacts
+
+Each capture creates a timestamped directory:
+data/artifacts/captures/YYYYMMDD_HHMMSS_<freq>Hz_<sample_rate>sps_<reason>/
+
+Artifacts:
+- iq/samples.iq: Raw IQ samples (complex64 binary, ~400 MB for 10 MS/s × 5s)
+- iq/samples.sigmf-meta: SigMF metadata (JSON)
+- features/spectrogram.npy: Full-resolution spectrogram (float32)
+- features/psd.npy: Power Spectral Density (float32)
+- features/stats.json: RF statistics (SNR, bandwidth, duty cycle, etc.)
+- thumbnails/spectrogram.png: Annotated PNG thumbnail
+- capture.json: Complete capture metadata
+
+4.3 Memory-Efficient Pipeline
+
+To handle large captures without OOM:
+- IQ data streamed directly to disk (no in-memory buffer)
+- Spectrogram computed in chunks from disk
+- Downsampled spectrogram (512×512) for ML
+- Aggressive memory cleanup (gc.collect())
+- Chunked file I/O
+
+4.4 Quality Metrics
+
+Computed for each capture:
+- DC offset (I/Q imbalance)
+- Clipping fraction
+- SNR (Signal-to-Noise Ratio)
+- Partial capture detection
+- Signal presence
+- Burstiness
+- Occupied bandwidth
+
+4.5 Signal Triage
+
+Lightweight classification before ML:
+- signal_present: True if signal above noise floor
+- likely_noise: True if characteristics suggest noise
+- burstiness: Coefficient of variation
+- wideband: True if occupied BW > 50% of capture BW
+- occupied_bw_hz: 3 dB bandwidth
+
+================================================================================
+5. MACHINE LEARNING CLASSIFICATION
+================================================================================
+
+5.1 Current Implementation
+
+Classification Pipeline:
+- ONNX Runtime-based inference (CPU provider)
+- Input: 512×512 float32 spectrogram (noise-floor normalized)
+- Fallback chain: ONNX → Orchestrator → Stub
+- Classification only runs if signal_present and not likely_noise
+
+5.2 Model Integration
+
+Model Location: spear_edge/ml/models/rf_classifier.onnx
+- ONNX format for cross-platform compatibility
+- Expected input: (1, 1, 512, 512) float32
+- Output: Class probabilities
+
+5.3 Classification Output
+
+Stored in capture.json:
+{
+  "classification": {
+    "label": "class_0",
+    "confidence": 0.95,
+    "topk": [...],
+    "model": "onnx"
+  }
+}
+
+5.4 Dataset Export
+
+Classified captures automatically exported to:
+data/dataset_raw/{capture_dir_name}/
+- spectrogram.npy
+- capture.json
+- thumbnails/
+
+For training data collection and model development.
+
+5.5 Future Enhancements
+
+- GPU acceleration (TensorRT/CUDA providers)
+- Model quantization (INT8)
+- Active learning from low-confidence predictions
+- Multi-model ensemble
+
+================================================================================
+6. TRIPWIRE INTEGRATION
+================================================================================
+
+6.1 Connection Protocol
+
+SPEAR-Edge requires TWO separate connections from Tripwire:
+1. WebSocket connection for connection status and control
+2. HTTP POST for event ingest (detection events)
+
+WebSocket Endpoints:
+- ws://<edge_ip>/ws/tripwire
+- ws://<edge_ip>/ws/tripwire_link
+
+HTTP Endpoint:
+- POST http://<edge_ip>/api/tripwire/event
+
+6.2 WebSocket Lifecycle
+
+1. Tripwire connects to WebSocket endpoint
+2. Sends "hello" message within 5 seconds (required)
+3. Receives "edge_state" message from Edge
+4. Sends periodic "heartbeat" messages (every 2-4 seconds)
+5. Optionally sends "status" messages for updates
+
+Connection Status:
+- Edge considers node "connected" if:
+  a. WebSocket connection is established AND
+  b. Last heartbeat received within 5 seconds
+- HTTP events do NOT set connected status (advisory only)
+
+6.3 Event Processing
+
+Event Payload Format:
+{
+  "schema": "spear.tripwire.event.v1",
+  "type": "rf_cue" | "fhss_cluster" | "confirmed_event",
+  "stage": "energy" | "cue" | "confirmed",
+  "node_id": "tripwire-01",
+  "freq_hz": 915000000.0,
+  "bandwidth_hz": 2000000.0,
+  "confidence": 0.95,
+  "classification": "drone_control",
+  "scan_plan": "fhss_track",
+  "timestamp": 1234567890.0
+}
+
+Auto-Capture Policy (Armed Mode):
+- Hard-block: type="rf_cue" → never actionable
+- Hard-block: type="heartbeat" → never actionable
+- Require: stage="confirmed" (energy/cue are advisory only)
+- Require: confidence >= 0.90 (default min_confidence)
+- Ignore: scan_plan in ("survey_wide", "wifi_bt_24g")
+- Cooldown checks: global (3.0s), per-node (2.0s), per-frequency (8.0s)
+- Rate limit: max 10 captures per minute
+
+6.4 Rejection Reasons
+
+If auto-capture is rejected:
+- "cue_only": Event is type="rf_cue" (advisory only)
+- "stage_not_confirmed_<stage>": Stage is not "confirmed"
+- "low_confidence": Confidence below threshold
+- "awareness_only": Scan plan is awareness-only
+- "global_cooldown": Too soon after last capture
+- "node_cooldown": Too soon after last capture from this node
+- "freq_cooldown": Too soon after last capture in this frequency bin
+- "rate_limited": Exceeded max captures per minute
+- "queue_full": Capture queue is full
+
+================================================================================
+7. ATAK INTEGRATION
+================================================================================
+
+7.1 CoT Protocol
+
+SPEAR-Edge integrates with ATAK via CoT (Cursor on Target) protocol:
+- UID: "SPEAR-EDGE" (configurable)
+- Callsign: "SPEAR-EDGE" (configurable)
+- Multicast groups:
+  * Position/Sensor: 239.2.3.1:6969
+  * All Chat: 224.10.10.1:17012
+- TTL: 1 (local network only)
+
+7.2 Message Types
+
+Position Updates:
+- Periodic multicast (every 5 seconds)
+- CoT type: "a-f-G-E-S-E" (friendly ground equipment)
+- Includes GPS coordinates (if available)
+- Stale time: 30 seconds
+
+Chat Messages (All Chat):
+- Online/Offline Status: "SPEAR-Edge Online connect to N tripwires ARMED..."
+- Capture Start: "SPEAR-Edge capturing X.XXX MHz (Manual capture) for 5.0s"
+- Classification Results: "<LABEL> detected @ X.XXX MHz (confidence 0.XX)"
+- Only sent for confirmed events (stage="confirmed")
+
+Detection Markers:
+- CoT type: "a-u-E-U" (unknown equipment)
+- Persistent marker on ATAK map
+- Includes classification label and confidence
+- Stale time: 120 seconds
+
+================================================================================
+8. API ENDPOINTS
+================================================================================
+
+8.1 HTTP REST API
+
+Health:
+- GET /api/health: System health check
+
+Hub:
+- GET /api/hub: System information and status
+
+Capture:
+- POST /api/capture/start: Initiate manual capture
+  Request: {freq_hz, sample_rate_sps, bandwidth_hz, gain_mode, gain_db, ...}
+  Response: {accepted: true, action: "capture_started"}
+
+Tripwire:
+- POST /api/tripwire/event: Receive Tripwire detection event
+  Request: {schema, type, stage, node_id, freq_hz, confidence, ...}
+  Response: {accepted: true, action: "auto_capture_started" | "rejected", ...}
+
+Edge Mode:
+- GET /api/edge/mode: Get current operator mode
+- POST /api/edge/mode: Set operator mode (manual/armed)
+
+8.2 WebSocket Endpoints
+
+/ws/live_fft:
+- Binary protocol for spectrum frames
+- Header: 32 bytes (or dynamic header_len)
+- Payload: FFT bins as float32 array
+- High-frequency updates (30 FPS)
+
+/ws/notify:
+- JSON protocol for UI events
+- Topics: tripwire_cue, edge_mode, tripwire_nodes, capture_start, etc.
+- Typed envelope: {type, payload, ts}
+
+/ws/tripwire:
+/ws/tripwire_link:
+- WebSocket connection from Tripwire nodes
+- Handles: hello, heartbeat, status, edge_state
+- Maintains node registry
+
+================================================================================
+9. USER INTERFACE
+================================================================================
+
+9.1 Web UI
+
+Technology:
+- Vanilla JavaScript (no frameworks)
+- Canvas API for FFT/waterfall rendering
+- WebSocket for real-time updates
+- Green theme (military-style)
+
+Features:
+- Real-time spectrum display (FFT line + waterfall)
+- SDR controls (frequency, sample rate, bandwidth, gain)
+- Capture controls (manual capture trigger)
+- Tripwire node status cards
+- Capture progress banner
+- Mode selector (manual/armed)
+- Tripwire scan plan dropdown
+- Waterfall brightness/contrast sliders
+
+9.2 Rendering Pipeline
+
+FFT Line:
+- Uses power_dbfs (max-hold or instant)
+- Display range: Fixed -90 to -20 dBFS
+- Smooth interpolation for visual stability
+
+Waterfall:
+- Uses power_inst_dbfs (instant power)
+- Scrolling via Canvas drawImage()
+- Percentile-based contrast adjustment
+- Gamma correction for color mapping
+- Fade effect for temporal smoothing
+
+================================================================================
+10. PERFORMANCE CHARACTERISTICS
+================================================================================
+
+10.1 Sample Rate Limits
+
+- Jetson Orin Nano: Up to ~30 MS/s with proper optimization
+- bladeRF 2.0 micro: Hardware limit ~30 MS/s
+- Recommended: 10-20 MS/s for stable operation
+- Higher rates may require decimation
+
+10.2 Capture Performance
+
+- IQ capture: Real-time (no dropped samples)
+- Spectrogram generation: ~1-2 seconds for 5s capture at 10 MS/s
+- File writing: ~2-5 seconds depending on disk speed
+- Total capture time: ~8-12 seconds for 5s capture
+
+10.3 Memory Usage
+
+- Ring buffer: 0.5 seconds of samples (sample_rate * 0.5)
+- Capture: Streamed to disk (minimal memory footprint)
+- Spectrogram: Computed in chunks from disk
+- Typical: <100 MB per capture in memory (down from ~500 MB)
+
+10.4 CPU Usage
+
+- FFT computation: ~10-20% CPU (single core)
+- SDR read thread: ~5-10% CPU
+- File I/O: Bursts during capture write
+- Overall: < 50% CPU during normal operation
+
+10.5 Queue Management
+
+- Max queue depth: 8 captures
+- Cooldown: 1.5 seconds minimum between captures
+- Queue full: New captures rejected (manual) or auto-rejected (Tripwire)
+
+================================================================================
+11. HARDWARE CONSTRAINTS
+================================================================================
+
+11.1 bladeRF Stream Lifecycle
+
+CRITICAL: bladeRF requires a specific order for stream operations:
+1. Set sample rate FIRST
+2. Set bandwidth
+3. Set frequency
+4. Enable RX channel
+5. ONLY THEN create and activate stream
+
+NEVER activate stream before RF parameters are set.
+
+11.2 bladeRF Read Sizes
+
+- ALWAYS use power-of-two read sizes (8192, 16384, etc.)
+- NEVER use arbitrary sizes - causes buffer timeouts
+- Use BLADE_RF_READ_SAMPLES = 8192 constant for consistency
+
+11.3 Sample Rate Limits
+
+- Jetson Orin Nano can handle up to ~30 MS/s with proper optimization
+- Use decimation for higher rates
+- Ring buffer size: int(sample_rate_sps * 0.5) (0.5 seconds of buffering)
+
+================================================================================
+12. DEPLOYMENT
+================================================================================
+
+12.1 System Requirements
+
+Hardware:
+- NVIDIA Jetson Orin Nano Developer Kit
+- SDR Device: bladeRF 2.0 micro (xA4/xA9) or ANT SDR E200 (AD9361)
+- USB 3.0 connection for SDR
+- Network interface for Tripwire and ATAK
+
+Software:
+- Linux (Jetson Linux recommended)
+- Python 3.10+
+- SoapySDR drivers installed and configured
+- CUDA 12.6+ (for future GPU acceleration)
+
+12.2 Installation
+
+1. Clone repository
+2. Create virtual environment: python3 -m venv venv
+3. Activate: source venv/bin/activate
+4. Install dependencies: pip install -r requirements.txt
+5. Verify SDR: SoapySDRUtil --find
+6. Run application: python -m spear_edge.app
+
+12.3 Configuration
+
+Environment Variables:
+- SPEAR_FPS: FFT update rate (default: 15.0)
+- SPEAR_APP_NAME: Application name (default: "SPEAR-Edge")
+
+Auto-Capture Policy (in orchestrator.py):
+- min_confidence: 0.90
+- global_cooldown_s: 3.0
+- per_node_cooldown_s: 2.0
+- per_freq_cooldown_s: 8.0
+- max_captures_per_min: 10
+
+12.4 Network Configuration
+
+- Web UI: http://<jetson_ip>:8000
+- API: http://<jetson_ip>:8000/api/*
+- WebSocket: ws://<jetson_ip>:8000/ws/*
+- ATAK Multicast: 239.2.3.1:6969, 224.10.10.1:17012
+
+================================================================================
+13. ERROR HANDLING
+================================================================================
+
+13.1 SDR Errors
+
+- Stream timeout: Retry with dummy reads, verify stream state
+- Device disconnect: Graceful degradation, log error
+- Invalid parameters: Reject capture request, return error
+
+13.2 Capture Errors
+
+- Queue full: Reject new capture, return "queue_full"
+- Cooldown violation: Skip capture, log warning
+- Timeout during capture: Abort, return partial capture
+- File write error: Log error, continue (capture may be incomplete)
+
+13.3 Network Errors
+
+- WebSocket disconnect: Clean unsubscribe, log
+- ATAK multicast failure: Log warning, continue (non-critical)
+- Tripwire connection loss: Mark node disconnected, update UI
+
+13.4 Recovery
+
+- SDR stream recovery: Automatic retry with stream re-initialization
+- Capture queue: Failed captures are logged but don't block queue
+- Event bus: Subscribers handle exceptions gracefully
+
+================================================================================
+14. DEVELOPMENT & EXTENSIBILITY
+================================================================================
+
+14.1 Code Organization
+
+spear_edge/
+├── api/              # HTTP and WebSocket endpoints
+│   ├── http/         # REST API routes
+│   └── ws/           # WebSocket handlers
+├── core/
+│   ├── orchestrator/  # Main orchestrator (SDR lifecycle)
+│   ├── sdr/          # SDR drivers (soapy.py, base.py)
+│   ├── scan/         # FFT processing (scan_task.py, rx_task.py)
+│   ├── capture/      # Capture management
+│   ├── bus/          # Event bus (pub/sub)
+│   └── classify/     # ML classification (stub)
+├── ml/               # Machine learning inference
+│   ├── infer_onnx.py # ONNX Runtime classifier
+│   └── models/       # ONNX model files
+└── ui/web/           # Frontend (HTML, CSS, JS)
+
+14.2 Adding New Features
+
+SDR Support:
+- Implement base.SDRDevice interface
+- Add SoapySDR driver string
+- Test stream lifecycle
+
+ML Models:
+- Export PyTorch/TensorFlow model to ONNX
+- Place in spear_edge/ml/models/
+- Update ONNXRfClassifier to load new model
+
+API Endpoints:
+- Add route in api/http/routes_*.py
+- Bind to app in app.py
+- Document in technical specs
+
+14.3 Testing
+
+Unit Tests:
+- Core components (orchestrator, capture_manager)
+- SDR abstraction layer
+- ML classification pipeline
+
+Integration Tests:
+- Full capture pipeline
+- Tripwire event processing
+- ATAK message generation
+
+Performance Tests:
+- Sample rate limits
+- Memory usage under load
+- Capture queue throughput
+
+================================================================================
+15. DOCUMENTATION INDEX
+================================================================================
+
+This technical data package includes:
+
+1. TECHNICAL_OVERVIEW.txt (this document)
+   - High-level system overview and architecture
+
+2. tech_specs.txt
+   - Detailed technical specification
+   - Capture artifacts and formats
+   - API reference
+   - Performance characteristics
+
+3. Spear Edge Software Requirements.txt
+   - Software Requirements Specification (SRS)
+   - Functional and non-functional requirements
+   - Interface specifications
+
+4. TRIPWIRE_EDGE_COMPATIBILITY.txt
+   - Tripwire integration protocol
+   - WebSocket and HTTP event formats
+   - Connection lifecycle
+   - Troubleshooting guide
+
+5. Edge Alignment Changes for Tripwire v1.1.txt
+   - Semantic alignment changes
+   - Event handling policy
+   - ATAK forwarding rules
+
+6. ML_INFERENCE_PLAN.txt
+   - ML classification implementation plan
+   - Model development workflow
+   - Dataset preparation
+   - Deployment strategy
+
+7. CHANGELOG.txt
+   - Version history
+   - Feature additions
+   - Bug fixes
+   - Breaking changes
+
+================================================================================
+16. FUTURE ENHANCEMENTS
+================================================================================
+
+Planned Features:
+- GPU acceleration for ML inference (TensorRT/CUDA)
+- Configuration file (YAML/JSON) with hot-reload
+- Log export (CSV format)
+- Android app for headless control
+- Automatic archiving of old captures
+- GPS integration for capture geolocation
+- VITA-49 full implementation
+- Model versioning and A/B testing
+- Active learning from low-confidence predictions
+
+================================================================================
+17. SUPPORT & CONTACT
+================================================================================
+
+For technical questions, bug reports, or feature requests:
+- Review documentation in technical_data_package/
+- Check CHANGELOG.txt for recent changes
+- Review code comments and docstrings
+- Consult TRIPWIRE_EDGE_COMPATIBILITY.txt for integration issues
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+

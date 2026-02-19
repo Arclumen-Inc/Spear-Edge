@@ -1,0 +1,7 @@
+fastapi>=0.100,<0.115
+uvicorn>=0.23
+pydantic>=2.0
+numpy>=1.23,<2.0
+python-dotenv
+websockets>=11
+onnxruntime>=1.16.0

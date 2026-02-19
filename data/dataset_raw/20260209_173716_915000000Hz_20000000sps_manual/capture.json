@@ -1,0 +1,111 @@
+{
+  "schema": "spear.edge.capture.v2",
+  "version": "2.0",
+  "request_provenance": {
+    "reason": "manual",
+    "source_node": null,
+    "scan_plan": null,
+    "priority": 50,
+    "original_timestamp": 1770658636.2547085
+  },
+  "rf_configuration": {
+    "center_freq_hz": 915000000,
+    "sample_rate_sps": 20000000,
+    "rx_channel": 0,
+    "bandwidth_hz": null,
+    "gain_mode": "manual",
+    "gain_db": 30.0,
+    "sdr_driver": "bladerf",
+    "sdr_serial": "f8d6fab6d4204ad496cc56cf185ec845",
+    "sdr_label": null
+  },
+  "timing": {
+    "system_time": 1770658679.6431656,
+    "capture_timestamp": 1770658636.2547085,
+    "duration_s": 3.3007712,
+    "n_samples": 66015424,
+    "gps_time": null,
+    "clock_uncertainty": null
+  },
+  "derived_stats": {
+    "noise_floor_db": -79.93662068183511,
+    "peak_db": -37.10820955561376,
+    "snr_db": 42.82841112622135,
+    "duty_cycle": 1.0,
+    "n_samples": 66015424,
+    "sample_rate_sps": 20000000
+  },
+  "quality": {
+    "valid": true,
+    "status": "degraded",
+    "warnings": [
+      "partial_capture"
+    ],
+    "dc_i": 1.121826187500119e-07,
+    "dc_q": 7.071940189007364e-08,
+    "rms": 0.00045931995856263,
+    "crest_factor": 3.1794537253809083,
+    "clip_fraction": 1.3333333333333334e-06,
+    "snr_db": 42.82841112622135
+  },
+  "file_references": {
+    "iq_file": "/home/spear/spear-edgev1_0/data/artifacts/captures/20260209_173716_915000000Hz_20000000sps_manual/iq/samples.iq",
+    "sigmf_meta": "/home/spear/spear-edgev1_0/data/artifacts/captures/20260209_173716_915000000Hz_20000000sps_manual/iq/samples.sigmf-meta",
+    "spectrogram_npy": "/home/spear/spear-edgev1_0/data/artifacts/captures/20260209_173716_915000000Hz_20000000sps_manual/features/spectrogram.npy",
+    "psd_npy": "/home/spear/spear-edgev1_0/data/artifacts/captures/20260209_173716_915000000Hz_20000000sps_manual/features/psd.npy",
+    "stats_json": "/home/spear/spear-edgev1_0/data/artifacts/captures/20260209_173716_915000000Hz_20000000sps_manual/features/stats.json",
+    "thumbnail_png": "/home/spear/spear-edgev1_0/data/artifacts/captures/20260209_173716_915000000Hz_20000000sps_manual/thumbnails/spectrogram.png",
+    "vita49_vrt": null
+  },
+  "request": {
+    "ts": 1770658636.2547085,
+    "reason": "manual",
+    "freq_hz": 915000000.0,
+    "sample_rate_sps": 20000000,
+    "duration_s": 5.0,
+    "rx_channel": 0,
+    "scan_plan": null,
+    "priority": 50,
+    "source_node": null,
+    "meta": {
+      "bandwidth_hz": null,
+      "gain_mode": "manual",
+      "gain_db": 30.0,
+      "classification": null
+    }
+  },
+  "triage": {
+    "signal_present": true,
+    "bursty": false,
+    "wideband": true,
+    "occupied_bw_hz": 19726562.5,
+    "likely_noise": false
+  },
+  "classification": {
+    "label": "unknown",
+    "confidence": 0.0,
+    "topk": [
+      {
+        "label": "unknown",
+        "p": 1.0
+      }
+    ],
+    "model": "stub"
+  },
+  "spectrogram_axes": {
+    "time_start_s": 0.0,
+    "time_end_s": 3.3007712,
+    "freq_start_hz": 905000000,
+    "freq_end_hz": 925000000,
+    "fft_size": 1024,
+    "hop_size": 256
+  },
+  "ml_features": {
+    "spectrogram_shape": [
+      512,
+      512
+    ],
+    "dtype": "float32",
+    "normalized": "noise_floor"
+  }
+}
