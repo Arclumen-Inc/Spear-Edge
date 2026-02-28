@@ -656,10 +656,19 @@ class Orchestrator:
                     "rx_overflows": getattr(self._rx_task, "overflows", 0),
                 }
             
-            # Merge SDR health with RX task stats
+            # Get ring buffer lock contention metrics if available
+            ring_metrics = {}
+            if self._ring and hasattr(self._ring, "get_lock_metrics"):
+                try:
+                    ring_metrics = self._ring.get_lock_metrics()
+                except Exception:
+                    pass  # Don't fail health check if metrics fail
+            
+            # Merge SDR health with RX task stats and ring buffer metrics
             health = {
                 **sdr_health,
                 "rx_task": rx_stats,
+                "ring_buffer": ring_metrics,
             }
             
             return health
