@@ -10,6 +10,7 @@ _TOPICS = (
     "capture_start",
     "capture_progress",
     "capture_complete",
+    "aoa_cone",  # AoA cone updates (v2.0)
 )
 
 

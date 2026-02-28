@@ -15,6 +15,7 @@ from spear_edge.api.http.routes_hub import router as hub_router
 from spear_edge.api.http.routes_tasking import bind as bind_tasking
 from spear_edge.api.http.routes_tripwire import bind as bind_tripwire
 from spear_edge.api.http.routes_edge_mode import bind as bind_edge_mode
+from spear_edge.api.http.routes_network import router as network_router
 
 from spear_edge.api.ws.live_fft_ws import live_fft_ws
 from spear_edge.api.ws.events_ws import events_ws
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(bind_tripwire())
     app.include_router(bind_edge_mode())
     app.include_router(bind_capture(orchestrator))
+    app.include_router(network_router)
     # --------------------------------------------------------
     # WEBSOCKET ROUTES (⚠️ MUST COME BEFORE StaticFiles)
     # --------------------------------------------------------

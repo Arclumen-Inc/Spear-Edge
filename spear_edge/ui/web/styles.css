@@ -118,6 +118,10 @@ pre {
   border-radius: 10px;
   box-shadow: 0 0 18px rgba(0, 0, 0, 0.6);
   padding: 10px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .panel-header {
@@ -448,6 +452,45 @@ input:focus, select:focus {
   margin-bottom: 8px;
 }
 
+/* Mode Buttons in Top Bar */
+.mode-buttons-top {
+  display: flex;
+  gap: 6px;
+}
+
+.mode-buttons-top .mode-btn {
+  padding: 6px 12px;
+  font-family: monospace;
+  font-weight: bold;
+  font-size: 11px;
+  background: #0a0f16;
+  border: 1px solid #333;
+  color: #888;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.mode-buttons-top .mode-btn:hover {
+  background: #11181f;
+  border-color: #444;
+}
+
+.mode-buttons-top .mode-btn.active {
+  color: white;
+  border-color: var(--accent-green);
+  background: var(--accent-green-dim);
+  box-shadow: 0 0 10px rgba(60, 255, 158, 0.4);
+}
+
+.mode-buttons-top #btnArmed.active {
+  border-color: var(--accent-green);
+  background: var(--accent-green-dim);
+  color: var(--accent-green);
+  box-shadow: 0 0 10px rgba(60, 255, 158, 0.4);
+}
+
 .mode-btn {
   flex: 1;
   padding: 10px;
@@ -601,6 +644,84 @@ input:focus, select:focus {
   display: block;
 }
 
+/* Top Bar Dropdown */
+.top-dropdown {
+  position: relative;
+}
+
+.top-dropdown-header {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-main);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.top-dropdown-header:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.top-dropdown-content {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  min-width: 280px;
+  background: var(--bg-panel);
+  border: 1px solid var(--bg-panel-border);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  padding: 0;
+}
+
+.top-dropdown-inner {
+  padding: 12px;
+}
+
+.top-dropdown-inner label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.top-dropdown-inner label:last-child {
+  margin-bottom: 0;
+}
+
+.top-dropdown-inner input {
+  width: 100%;
+  padding: 6px 8px;
+  margin-top: 4px;
+  background: #0a0f16;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.top-dropdown-inner input:focus {
+  outline: none;
+  border-color: var(--accent-green);
+}
+
+.top-dropdown-inner .btn-row {
+  margin: 10px 0;
+}
+
+.top-dropdown-inner .subdivider {
+  margin: 10px 0;
+  border: none;
+  border-top: 1px solid var(--bg-panel-border);
+}
+
 .sdr-status {
   font-family: monospace;
   font-size: 12px;
@@ -724,4 +845,102 @@ input:focus, select:focus {
 
 #cueList, #captureLog {
   background: transparent;
+}
+
+/* AoA Fusion Panel */
+#aoaFusionContainer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+#aoaFusionCanvas {
+  width: 100%;
+  max-width: 100%;
+  height: 250px;
+  background: #070a0f;
+  border: 1px solid var(--bg-panel-border);
+  border-radius: 8px;
+  cursor: crosshair;
+  display: block;
+  box-sizing: border-box;
+}
+
+.aoa-fusion-data {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11px;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.aoa-status {
+  padding: 6px 8px;
+  background: rgba(60, 255, 158, 0.1);
+  border: 1px solid rgba(60, 255, 158, 0.3);
+  border-radius: 6px;
+  color: var(--accent-green);
+  font-weight: 600;
+  text-align: center;
+}
+
+.aoa-cones-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.aoa-cone-item {
+  padding: 6px 8px;
+  background: rgba(127, 143, 166, 0.1);
+  border: 1px solid var(--bg-panel-border);
+  border-radius: 6px;
+  font-size: 10px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  word-wrap: break-word;
+}
+
+.aoa-cone-item strong {
+  color: var(--accent-green);
+  margin-right: 6px;
+}
+
+.aoa-fusion-result {
+  padding: 8px;
+  background: rgba(60, 255, 158, 0.15);
+  border: 1px solid var(--accent-green);
+  border-radius: 6px;
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.aoa-fusion-result .fusion-label {
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.aoa-fusion-result .fusion-coords {
+  color: var(--accent-green);
+  font-weight: 600;
+}
+
+.aoa-fusion-result .fusion-quality {
+  margin-top: 4px;
+  font-size: 9px;
+  color: var(--text-muted);
 }

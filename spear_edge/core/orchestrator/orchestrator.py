@@ -88,6 +88,11 @@ class Orchestrator:
         self.tripwire_cues: List[Dict[str, Any]] = []
         self.max_tripwire_cues: int = 10
         self.tripwires = TripwireRegistry(max_nodes=3)
+        
+        # AoA cone tracking (v2.0)
+        # Store recent AoA cone events for bearing visualization
+        self.aoa_cones: List[Dict[str, Any]] = []
+        self.max_aoa_cones: int = 20  # Store more AoA events (they're continuous updates)
 
         # Auto-capture policy (used only in ARMED mode)
         self.auto_policy = AutoCapturePolicy()
@@ -325,9 +330,31 @@ class Orchestrator:
         - Tripwire does not assert intent or threat
         - Cues are stored in short rolling buffer for UI display only
         """
+        # Special handling for AoA cone events (v2.0)
+        event_type = cue.get("type") or cue.get("event_type", "")
+        if event_type == "aoa_cone":
+            self._record_aoa_cone(cue)
+            return
+        
         self.tripwire_cues.append(cue)
         if len(self.tripwire_cues) > self.max_tripwire_cues:
             self.tripwire_cues.pop(0)
+    
+    def _record_aoa_cone(self, cone: Dict[str, Any]) -> None:
+        """
+        Record an AoA cone event for bearing tracking.
+        AoA cones are continuous updates, so we maintain a larger buffer.
+        """
+        # Add timestamp if not present
+        if "timestamp" not in cone:
+            cone["timestamp"] = time.time()
+        
+        self.aoa_cones.append(cone)
+        if len(self.aoa_cones) > self.max_aoa_cones:
+            self.aoa_cones.pop(0)
+        
+        # Publish AoA update to UI
+        self.bus.publish_nowait("aoa_cone", cone)
 
     def _freq_bin(self, freq_hz: float) -> int:
         b = int(self.auto_policy.freq_bin_hz)
@@ -339,9 +366,9 @@ class Orchestrator:
         """
         Determine if an event is eligible for auto-capture.
         
-        Per Tripwire v1.1 alignment:
-        - Cues (type="rf_cue") are advisory only and never trigger auto-capture
-        - Only confirmed events (stage="confirmed") with sufficient confidence are eligible
+        Supports both Tripwire v1.1 and v2.0 event formats:
+        - v1.1: Uses "stage" field (requires stage="confirmed")
+        - v2.0: Uses event types directly (fhss_cluster is actionable)
         - Edge is the authority; Tripwire does not assert intent or threat
         """
         # 1. Hard-block cues - they are advisory only, never actionable
@@ -353,14 +380,31 @@ class Orchestrator:
         # 2. Never capture heartbeats
         if event_type == "heartbeat":
             return False, "heartbeat"
+        
+        # 3. Block v2.0 advisory-only event types
+        if event_type in ("aoa_cone", "rf_energy_start", "rf_energy_end", "rf_spike"):
+            return False, f"advisory_only_{event_type}"
+        
+        # 4. Block system events
+        if event_type.startswith("ibw_calibration_") or event_type in ("df_metrics", "df_bearing"):
+            return False, f"system_event_{event_type}"
 
-        # 3. Require stage == "confirmed" for action eligibility
-        # Per Tripwire v1.1: only confirmed events are eligible for auto-capture
+        # 5. Check for v1.1 stage field OR v2.0 event type eligibility
+        # v1.1: requires stage="confirmed"
+        # v2.0: fhss_cluster is actionable (equivalent to confirmed)
         stage = payload.get("stage")
-        if stage != "confirmed":
-            return False, f"stage_not_confirmed_{stage or 'missing'}"
+        if stage is not None:
+            # v1.1 format - require stage="confirmed"
+            if stage != "confirmed":
+                return False, f"stage_not_confirmed_{stage or 'missing'}"
+        else:
+            # v2.0 format - only fhss_cluster is actionable (no stage field)
+            if event_type != "fhss_cluster":
+                # For v2.0, if no stage field and not fhss_cluster, check if it's a legacy confirmed_event
+                if event_type != "confirmed_event":
+                    return False, f"v2_event_not_actionable_{event_type}"
 
-        # 4. Require confidence (use policy min_confidence)
+        # 6. Require confidence (use policy min_confidence)
         # Tripwire confidence = signal confidence; Edge applies its own threshold
         conf = float(payload.get("confidence", 0.0))
         if conf < float(self.auto_policy.min_confidence):
@@ -433,6 +477,7 @@ class Orchestrator:
             "last_frame_ts": self._last_frame_ts,
             "running_job": self._job,
             "tripwire_cues": list(self.tripwire_cues),
+            "aoa_cones": list(self.aoa_cones[-5:]),  # Return last 5 AoA cones
             "queue_depth": None,  # reserved for future job queue
             "task": self.task_info,
             "auto_policy": asdict(self.auto_policy),

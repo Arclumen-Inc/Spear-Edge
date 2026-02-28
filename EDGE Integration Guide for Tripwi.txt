@@ -1,0 +1,628 @@
+# EDGE Integration Guide for Tripwire v2.0
+
+## Overview
+
+This guide documents how to integrate with Tripwire v2.0 for EDGE systems. Tripwire emits RF events (cues) and AoA events (cones) via WebSocket and REST API that can be consumed by EDGE for real-time situational awareness.
+
+**Last Updated**: 2026-02-19  
+**Tripwire Version**: 2.0  
+**Base URL**: `http://<tripwire-ip>:8082`
+
+---
+
+## Table of Contents
+
+1. [Recent Changes](#recent-changes)
+2. [Event Types](#event-types)
+3. [WebSocket Subscription](#websocket-subscription)
+4. [REST API Endpoints](#rest-api-endpoints)
+5. [Event Schemas](#event-schemas)
+6. [Integration Examples](#integration-examples)
+7. [Configuration](#configuration)
+
+---
+
+## Recent Changes
+
+### Performance Improvements (2026-02-19)
+- **AoA Throughput**: Improved to 201-202 MBps (84% efficiency)
+- **Sweep Throughput**: Improved to 130 MBps (from 13-18 MBps)
+- **FFT Display**: Fixed freezing issues, now shows dynamic range
+- **Ring Buffer**: Fixed zero-read issues, proper read position
+
+### New Features
+- **Fast Frequency Tuning**: Sweep mode uses fast frequency-only set (avoids expensive reconfiguration)
+- **Improved Event Routing**: Better event classification and routing to EDGE
+- **AoA Cone Events**: Real-time bearing and cone width updates
+- **Event Registry**: Historical event storage and querying
+
+### API Changes
+- **WebSocket Endpoint**: `/ws/trip_events` (unchanged)
+- **REST API**: `/api/events` with filtering support
+- **Event Types**: Standardized event types and schemas
+
+---
+
+## Event Types
+
+Tripwire emits several types of events that EDGE can subscribe to:
+
+### RF Events (Cues)
+
+1. **`rf_cue`** - Single RF detection event
+   - Emitted when signal detected above threshold
+   - Includes frequency, signal strength, confidence
+
+2. **`rf_energy_start`** - Start of continuous RF energy
+   - Emitted when signal activity begins
+   - Used for tracking signal presence
+
+3. **`rf_energy_end`** - End of continuous RF energy
+   - Emitted when signal activity stops
+   - Used for tracking signal absence
+
+4. **`rf_spike`** - Transient spike detection
+   - Emitted for brief signal detections
+   - Lower confidence than `rf_cue`
+
+5. **`fhss_cluster`** - FHSS (Frequency Hopping) cluster
+   - Emitted when multiple hops detected
+   - Includes hop count, frequency span, classification
+
+### AoA Events (Cones)
+
+6. **`aoa_cone`** - Angle of Arrival cone event
+   - Emitted continuously during AoA mode
+   - Includes bearing, cone width, confidence, trend
+   - Includes bearing history for cone accumulation
+
+### Special Events
+
+7. **`ibw_calibration_start`** - IBW calibration started
+8. **`ibw_calibration_progress`** - IBW calibration progress
+9. **`ibw_calibration_complete`** - IBW calibration complete
+10. **`df_metrics`** - Manual DF metrics update
+11. **`df_bearing`** - Manual DF bearing update
+
+---
+
+## WebSocket Subscription
+
+### Endpoint
+```
+ws://<tripwire-ip>:8082/ws/trip_events
+```
+
+### Connection
+
+The WebSocket connection is **one-way** (Tripwire → EDGE). EDGE connects and receives events. No messages need to be sent from EDGE.
+
+### Connection Example (Python)
+
+```python
+import asyncio
+import websockets
+import json
+from typing import Dict, Any
+
+class TripwireEdgeClient:
+    def __init__(self, tripwire_ip: str = "192.168.1.100", port: int = 8082):
+        self.uri = f"ws://{tripwire_ip}:{port}/ws/trip_events"
+        self.running = False
+    
+    async def connect(self):
+        """Connect to Tripwire WebSocket and process events."""
+        self.running = True
+        try:
+            async with websockets.connect(self.uri) as websocket:
+                print(f"Connected to Tripwire at {self.uri}")
+                while self.running:
+                    message = await websocket.recv()
+                    event = json.loads(message)
+                    await self.handle_event(event)
+        except websockets.exceptions.ConnectionClosed:
+            print("Connection closed")
+        except Exception as e:
+            print(f"Error: {e}")
+    
+    async def handle_event(self, event: Dict[str, Any]):
+        """Process incoming event."""
+        event_type = event.get("type") or event.get("event_type")
+        
+        if event_type == "rf_cue":
+            await self.handle_rf_cue(event)
+        elif event_type == "aoa_cone":
+            await self.handle_aoa_cone(event)
+        elif event_type == "fhss_cluster":
+            await self.handle_fhss_cluster(event)
+        elif event_type in ("rf_energy_start", "rf_energy_end"):
+            await self.handle_energy_event(event)
+        else:
+            print(f"Unhandled event type: {event_type}")
+    
+    async def handle_rf_cue(self, event: Dict[str, Any]):
+        """Process RF cue event."""
+        freq_mhz = event.get("freq_hz", 0) / 1e6
+        delta_db = event.get("delta_db", 0)
+        confidence = event.get("confidence", 0)
+        classification = event.get("classification", "rf_activity")
+        
+        print(f"RF Cue: {freq_mhz:.3f} MHz, {delta_db:.1f} dB, "
+              f"confidence={confidence:.2f}, class={classification}")
+        
+        # Send to EDGE processing pipeline
+        await self.send_to_edge(event)
+    
+    async def handle_aoa_cone(self, event: Dict[str, Any]):
+        """Process AoA cone event."""
+        bearing = event.get("bearing_deg", 0)
+        cone_width = event.get("cone_width_deg", 90)
+        confidence = event.get("confidence", 0)
+        trend = event.get("trend", "stable")
+        
+        print(f"AoA Cone: bearing={bearing}°, width={cone_width}°, "
+              f"confidence={confidence:.2f}, trend={trend}")
+        
+        # Send to EDGE processing pipeline
+        await self.send_to_edge(event)
+    
+    async def handle_fhss_cluster(self, event: Dict[str, Any]):
+        """Process FHSS cluster event."""
+        freq_mhz = event.get("freq_hz", 0) / 1e6
+        hops = event.get("hop_count", 0)
+        span_mhz = event.get("span_mhz", 0)
+        classification = event.get("classification", "FHSS activity")
+        
+        print(f"FHSS Cluster: {freq_mhz:.3f} MHz, {hops} hops, "
+              f"{span_mhz:.2f} MHz span, class={classification}")
+        
+        # Send to EDGE processing pipeline
+        await self.send_to_edge(event)
+    
+    async def handle_energy_event(self, event: Dict[str, Any]):
+        """Process energy start/end event."""
+        event_type = event.get("type") or event.get("event_type")
+        freq_mhz = event.get("freq_hz", 0) / 1e6
+        
+        print(f"Energy {event_type}: {freq_mhz:.3f} MHz")
+        
+        # Send to EDGE processing pipeline
+        await self.send_to_edge(event)
+    
+    async def send_to_edge(self, event: Dict[str, Any]):
+        """Send event to EDGE processing pipeline."""
+        # Implement your EDGE integration here
+        pass
+
+# Usage
+async def main():
+    client = TripwireEdgeClient(tripwire_ip="192.168.1.100")
+    await client.connect()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Connection Example (JavaScript/Node.js)
+
+```javascript
+const WebSocket = require('ws');
+
+class TripwireEdgeClient {
+    constructor(tripwireIp = '192.168.1.100', port = 8082) {
+        this.uri = `ws://${tripwireIp}:${port}/ws/trip_events`;
+        this.ws = null;
+    }
+    
+    connect() {
+        this.ws = new WebSocket(this.uri);
+        
+        this.ws.on('open', () => {
+            console.log(`Connected to Tripwire at ${this.uri}`);
+        });
+        
+        this.ws.on('message', (data) => {
+            const event = JSON.parse(data);
+            this.handleEvent(event);
+        });
+        
+        this.ws.on('error', (error) => {
+            console.error('WebSocket error:', error);
+        });
+        
+        this.ws.on('close', () => {
+            console.log('Connection closed');
+            // Reconnect after 5 seconds
+            setTimeout(() => this.connect(), 5000);
+        });
+    }
+    
+    handleEvent(event) {
+        const eventType = event.type || event.event_type;
+        
+        switch (eventType) {
+            case 'rf_cue':
+                this.handleRfCue(event);
+                break;
+            case 'aoa_cone':
+                this.handleAoaCone(event);
+                break;
+            case 'fhss_cluster':
+                this.handleFhssCluster(event);
+                break;
+            case 'rf_energy_start':
+            case 'rf_energy_end':
+                this.handleEnergyEvent(event);
+                break;
+            default:
+                console.log(`Unhandled event type: ${eventType}`);
+        }
+    }
+    
+    handleRfCue(event) {
+        const freqMHz = event.freq_hz / 1e6;
+        const deltaDb = event.delta_db;
+        const confidence = event.confidence;
+        const classification = event.classification || 'rf_activity';
+        
+        console.log(`RF Cue: ${freqMHz.toFixed(3)} MHz, ${deltaDb.toFixed(1)} dB, ` +
+                   `confidence=${confidence.toFixed(2)}, class=${classification}`);
+        
+        // Send to EDGE processing pipeline
+        this.sendToEdge(event);
+    }
+    
+    handleAoaCone(event) {
+        const bearing = event.bearing_deg;
+        const coneWidth = event.cone_width_deg;
+        const confidence = event.confidence;
+        const trend = event.trend;
+        
+        console.log(`AoA Cone: bearing=${bearing}°, width=${coneWidth}°, ` +
+                   `confidence=${confidence.toFixed(2)}, trend=${trend}`);
+        
+        // Send to EDGE processing pipeline
+        this.sendToEdge(event);
+    }
+    
+    handleFhssCluster(event) {
+        const freqMHz = event.freq_hz / 1e6;
+        const hops = event.hop_count;
+        const spanMHz = event.span_mhz;
+        const classification = event.classification || 'FHSS activity';
+        
+        console.log(`FHSS Cluster: ${freqMHz.toFixed(3)} MHz, ${hops} hops, ` +
+                   `${spanMHz.toFixed(2)} MHz span, class=${classification}`);
+        
+        // Send to EDGE processing pipeline
+        this.sendToEdge(event);
+    }
+    
+    handleEnergyEvent(event) {
+        const eventType = event.type || event.event_type;
+        const freqMHz = event.freq_hz / 1e6;
+        
+        console.log(`Energy ${eventType}: ${freqMHz.toFixed(3)} MHz`);
+        
+        // Send to EDGE processing pipeline
+        this.sendToEdge(event);
+    }
+    
+    sendToEdge(event) {
+        // Implement your EDGE integration here
+    }
+}
+
+// Usage
+const client = new TripwireEdgeClient('192.168.1.100');
+client.connect();
+```
+
+---
+
+## REST API Endpoints
+
+### Get Recent Events
+
+**Endpoint**: `GET /api/events`
+
+**Query Parameters**:
+- `limit` (int, default: 10): Maximum number of events to return
+- `event_type` (string, optional): Filter by event type (e.g., `"rf_cue"`, `"aoa_cone"`)
+- `classification` (string, optional): Filter by classification
+- `min_confidence` (float, optional): Minimum confidence threshold (0.0-1.0)
+
+**Example Request**:
+```bash
+curl "http://192.168.1.100:8082/api/events?event_type=rf_cue&limit=20&min_confidence=0.5"
+```
+
+**Example Response**:
+```json
+{
+    "ok": true,
+    "events": [
+        {
+            "event_id": "evt_1234567890",
+            "event_type": "rf_cue",
+            "freq_hz": 915000000.0,
+            "delta_db": 15.5,
+            "confidence": 0.75,
+            "classification": "rf_activity",
+            "timestamp": 1705678901.234
+        }
+    ],
+    "count": 1
+}
+```
+
+### Get Specific Event
+
+**Endpoint**: `GET /api/events/{event_id}`
+
+**Example Request**:
+```bash
+curl "http://192.168.1.100:8082/api/events/evt_1234567890"
+```
+
+### Get Events by Group
+
+**Endpoint**: `GET /api/events/group/{event_group_id}`
+
+Returns all events in a correlated group.
+
+### Inject RF Cue to EDGE
+
+**Endpoint**: `POST /inject_cue_to_edge`
+
+**Body** (JSON, all fields optional):
+```json
+{
+    "freq_hz": 915000000.0,
+    "delta_db": 15.0,
+    "confidence": 0.3,
+    "scan_plan": "fhss_subghz_ibw",
+    "bandwidth_hz": 50000.0
+}
+```
+
+**Example Request**:
+```bash
+curl -X POST "http://192.168.1.100:8082/inject_cue_to_edge" \
+     -H "Content-Type: application/json" \
+     -d '{"freq_hz": 915000000.0, "delta_db": 15.0}'
+```
+
+---
+
+## Event Schemas
+
+### RF Cue Event
+
+```json
+{
+    "type": "rf_cue",
+    "event_type": "rf_cue",
+    "event_id": "evt_1234567890",
+    "event_group_id": "grp_1234567890",
+    "freq_hz": 915000000.0,
+    "delta_db": 15.5,
+    "confidence": 0.75,
+    "classification": "rf_activity",
+    "scan_plan": "fhss_subghz_ibw",
+    "bandwidth_hz": 50000.0,
+    "timestamp": 1705678901.234,
+    "gps_lat": 40.7128,
+    "gps_lon": -74.0060,
+    "gps_alt": 10.0,
+    "heading_deg": 245.3
+}
+```
+
+### AoA Cone Event
+
+```json
+{
+    "type": "aoa_cone",
+    "event_type": "aoa_cone",
+    "bearing_deg": 245.3,
+    "cone_width_deg": 45.0,
+    "confidence": 0.85,
+    "trend": "closing",
+    "timestamp": 1705678901.234,
+    "multipath_flag": false,
+    "strength_db": -45.2,
+    "delta_db": 8.5,
+    "noise_db": -60.0,
+    "center_freq_mhz": 5772.5,
+    "status": "active",
+    "squelch_passed": true,
+    "bearing_history": [
+        {
+            "bearing": 245.3,
+            "cone_width": 45.0,
+            "confidence": 0.85,
+            "timestamp": 1705678901.234
+        }
+    ]
+}
+```
+
+### FHSS Cluster Event
+
+```json
+{
+    "type": "fhss_cluster",
+    "event_type": "fhss_cluster",
+    "event_id": "evt_1234567890",
+    "freq_hz": 915000000.0,
+    "hop_count": 15,
+    "span_mhz": 2.5,
+    "unique_buckets": 12,
+    "confidence": 0.90,
+    "classification": "possible_drone_control",
+    "scan_plan": "fhss_subghz_ibw",
+    "timestamp": 1705678901.234,
+    "gps_lat": 40.7128,
+    "gps_lon": -74.0060
+}
+```
+
+### RF Energy Start/End Event
+
+```json
+{
+    "type": "rf_energy_start",
+    "event_type": "rf_energy_start",
+    "freq_hz": 915000000.0,
+    "timestamp": 1705678901.234,
+    "classification": "rf_activity"
+}
+```
+
+---
+
+## Integration Examples
+
+### Filter Events by Type
+
+```python
+# Only process RF cues and AoA cones
+async def handle_event(self, event: Dict[str, Any]):
+    event_type = event.get("type") or event.get("event_type")
+    
+    if event_type in ("rf_cue", "aoa_cone", "fhss_cluster"):
+        await self.send_to_edge(event)
+```
+
+### Filter by Confidence
+
+```python
+# Only process high-confidence events
+async def handle_event(self, event: Dict[str, Any]):
+    confidence = event.get("confidence", 0)
+    
+    if confidence >= 0.7:  # 70% confidence threshold
+        await self.send_to_edge(event)
+```
+
+### Track AoA Bearing History
+
+```python
+# Use bearing history for cone visualization
+async def handle_aoa_cone(self, event: Dict[str, Any]):
+    history = event.get("bearing_history", [])
+    
+    if len(history) >= 5:
+        # Enough history for cone visualization
+        bearings = [h["bearing"] for h in history]
+        cone_center = sum(bearings) / len(bearings)
+        
+        # Send to EDGE with cone visualization data
+        await self.send_to_edge({
+            **event,
+            "cone_center": cone_center,
+            "history_count": len(history)
+        })
+```
+
+### Monitor FHSS Activity
+
+```python
+# Track FHSS clusters for pattern detection
+async def handle_fhss_cluster(self, event: Dict[str, Any]):
+    hops = event.get("hop_count", 0)
+    span = event.get("span_mhz", 0)
+    classification = event.get("classification", "")
+    
+    # Only process significant FHSS activity
+    if hops >= 10 and span >= 1.0:
+        await self.send_to_edge(event)
+```
+
+---
+
+## Configuration
+
+### Tripwire Configuration
+
+Key settings in `config/config.json`:
+
+```json
+{
+    "spear_enabled": true,
+    "spear_host": "edge-server-ip",
+    "edge_ws_port": 8080,
+    "alert_policy": {
+        "rf_cue": {
+            "edge": true,
+            "ui": true
+        },
+        "aoa_cone": {
+            "edge": true,
+            "ui": true
+        }
+    }
+}
+```
+
+### Event Routing
+
+Events are routed based on `alert_policy` configuration:
+- **`edge`**: Send to EDGE via WebSocket client
+- **`ui`**: Send to UI via WebSocket
+- **`tak_chat`**: Send to ATAK chat
+- **`tak_marker`**: Send to ATAK as marker
+
+---
+
+## Best Practices
+
+1. **Use WebSocket for Real-Time**: WebSocket provides lowest latency for real-time events
+2. **Use REST API for History**: REST API is suitable for querying historical events
+3. **Filter on Client Side**: Subscribe to all events and filter on EDGE side for flexibility
+4. **Handle Reconnection**: Implement automatic reconnection logic for WebSocket
+5. **Rate Limiting**: Be aware that AoA cones are emitted at 10-15 Hz
+6. **Event Batching**: Consider batching events for EDGE processing if needed
+
+---
+
+## Troubleshooting
+
+### WebSocket Connection Issues
+
+- **Check IP and Port**: Verify Tripwire is accessible at `http://<ip>:8082`
+- **Check Firewall**: Ensure port 8082 is open
+- **Check Logs**: Review Tripwire logs for connection errors
+
+### Missing Events
+
+- **Check Alert Policy**: Verify `alert_policy` allows events to be sent to EDGE
+- **Check Confidence**: Some events may be filtered by confidence threshold
+- **Check Mode**: Ensure Tripwire is in appropriate mode (AoA for cones, Sweep/IBW for cues)
+
+### Event Format Issues
+
+- **Check Event Type**: Verify event has `type` or `event_type` field
+- **Check Schema**: Refer to event schemas above for required fields
+- **Check JSON**: Ensure events are valid JSON
+
+---
+
+## Support
+
+For issues or questions:
+- Check Tripwire logs: `/var/log/tripwire/` or console output
+- Review event schemas in this document
+- Check WebSocket connection status
+- Verify configuration settings
+
+---
+
+## Version History
+
+- **2026-02-19**: Initial EDGE integration guide
+  - Documented WebSocket and REST API
+  - Added event schemas
+  - Added integration examples
+  - Documented recent performance improvements

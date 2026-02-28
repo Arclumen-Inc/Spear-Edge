@@ -28,11 +28,23 @@ const taskBanner        = document.getElementById("taskBanner");
 const taskFromEl        = document.getElementById("taskFrom");
 const taskFreqEl        = document.getElementById("taskFreq");
 const taskProfileEl     = document.getElementById("taskProfile");
-const takHeader         = document.getElementById("takHeader");
-const takBody           = document.getElementById("takBody");
+const takHeader         = document.getElementById("takHeaderTop");
+const takBody           = document.getElementById("takBodyTop");
 const takCaret          = takHeader ? takHeader.querySelector(".caret") : null;
-const modePill          = document.getElementById("modePill");
+const networkHeader     = document.getElementById("networkHeaderTop");
+const networkBody       = document.getElementById("networkBodyTop");
+const networkCaret      = networkHeader ? networkHeader.querySelector(".caret") : null;
+const l4tbr0Input       = document.getElementById("l4tbr0Input");
+const eth0Input         = document.getElementById("eth0Input");
+const btnSetL4tbr0      = document.getElementById("btnSetL4tbr0");
+const btnSetEth0        = document.getElementById("btnSetEth0");
+// modePill removed - mode shown via button highlighting
 const armedBanner       = document.getElementById("armedBanner");
+const aoaFusionCanvas   = document.getElementById("aoaFusionCanvas");
+const aoaFusionCtx      = aoaFusionCanvas ? aoaFusionCanvas.getContext("2d") : null;
+const aoaStatusEl       = document.getElementById("aoaStatus");
+const aoaConesListEl    = document.getElementById("aoaConesList");
+const aoaFusionResultEl = document.getElementById("aoaFusionResult");
 const captureBanner     = document.getElementById("captureBanner");
 const captureProgressBar = document.getElementById("captureProgressBar");
 const wsLed             = document.getElementById("wsLed");
@@ -60,7 +72,7 @@ const sdrRateEl         = document.getElementById("sdr-rate");
 const sdrGainEl         = document.getElementById("sdr-gain");
 const sdrGainModeEl     = document.getElementById("sdr-gain-mode");
 
-const edgeModeLabel     = document.getElementById("edgeModeLabel");
+// edgeModeLabel removed - mode shown in modePill instead
 const btnManual         = document.getElementById("btnManual");
 const btnArmed          = document.getElementById("btnArmed");
 
@@ -104,6 +116,21 @@ const API = {
       if (r.ok) return await r.json();
     } catch (_) {}
     return null;
+  },
+  async getNetworkConfig() {
+    try {
+      const r = await fetch("/api/network/config", { cache: "no-store" });
+      if (r.ok) return await r.json();
+    } catch (_) {}
+    return null;
+  },
+  async setNetworkInterface(interfaceName, address) {
+    const r = await fetch("/api/network/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ interface: interfaceName, address }),
+    });
+    return await r.json().catch(() => ({}));
   },
   async liveStart(payload) {
     const urls = ["/live/start"];
@@ -273,7 +300,7 @@ async function refreshEdgeMode() {
     const r = await fetch(`/api/edge/mode`);
     const j = await r.json();
     const mode = j.mode || "unknown";
-    if (edgeModeLabel) edgeModeLabel.textContent = `Mode: ${mode}`;
+    // Mode is shown via button highlighting
     if (btnManual) btnManual.classList.toggle("active", mode === "manual");
     if (btnArmed) btnArmed.classList.toggle("active", mode === "armed");
     if (armedBanner) armedBanner.style.display = mode === "armed" ? "block" : "none";
@@ -341,13 +368,21 @@ function setEdgeMode(mode) {
 }
 
 function updateModeUI() {
-  if (modePill) {
-    modePill.classList.remove("manual", "armed", "tasked");
-    modePill.textContent = edgeMode === "manual" ? "MODE: MANUAL" :
-                           edgeMode === "armed" ? "MODE: ARMED" : "MODE: TASKED";
-    modePill.classList.add(edgeMode);
-    edgeMode === "tasked" ? lockSdrControls() : unlockSdrControls();
+  // Update button highlighting - active mode button gets green highlight
+  if (btnManual) {
+    btnManual.classList.toggle("active", edgeMode === "manual");
   }
+  if (btnArmed) {
+    btnArmed.classList.toggle("active", edgeMode === "armed");
+  }
+  
+  // Lock SDR controls in tasked mode
+  if (edgeMode === "tasked") {
+    lockSdrControls();
+  } else {
+    unlockSdrControls();
+  }
+  
   if (armedBanner) armedBanner.classList.toggle("active", edgeMode === "armed");
   updateGainUiLock();
 }
@@ -1386,6 +1421,506 @@ function renderTripwireNodes(nodes) {
   updateTripwireLeds(connectedCount);
 }
 
+// ------------------------------
+// AoA FUSION VISUALIZATION
+// ------------------------------
+
+// Node colors for visualization
+const NODE_COLORS = [
+  "#3cff9e", // green
+  "#00b3ff", // blue
+  "#ff8c00", // orange
+];
+
+/**
+ * Calculate intersection point from two bearing lines (triangulation)
+ * Returns {lat, lon} or null if calculation fails
+ */
+function calculateIntersection(node1, bearing1, node2, bearing2) {
+  if (!node1.gps || !node2.gps || !node1.gps.lat || !node2.gps.lat) {
+    return null;
+  }
+  
+  const lat1 = node1.gps.lat * Math.PI / 180;
+  const lon1 = node1.gps.lon * Math.PI / 180;
+  const lat2 = node2.gps.lat * Math.PI / 180;
+  const lon2 = node2.gps.lon * Math.PI / 180;
+  
+  const brg1 = bearing1 * Math.PI / 180;
+  const brg2 = bearing2 * Math.PI / 180;
+  
+  // Calculate intersection using spherical trigonometry
+  // Using Vincenty's formula for bearing intersection
+  const dLat = lat2 - lat1;
+  const dLon = lon2 - lon1;
+  
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1) * Math.cos(lat2) *
+            Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const distance = 6371000 * c; // Earth radius in meters
+  
+  // Simplified intersection calculation
+  // For small distances, use plane geometry approximation
+  if (distance < 10000) { // Less than 10km
+    // Convert to local coordinates (meters)
+    const R = 6371000; // Earth radius in meters
+    const x1 = R * Math.cos(lat1) * Math.cos(lon1);
+    const y1 = R * Math.cos(lat1) * Math.sin(lon1);
+    const x2 = R * Math.cos(lat2) * Math.cos(lon2);
+    const y2 = R * Math.cos(lat2) * Math.sin(lon2);
+    
+    // Direction vectors
+    const dx1 = Math.sin(brg1);
+    const dy1 = Math.cos(brg1);
+    const dx2 = Math.sin(brg2);
+    const dy2 = Math.cos(brg2);
+    
+    // Find intersection of two lines
+    // Line 1: (x1, y1) + t * (dx1, dy1)
+    // Line 2: (x2, y2) + s * (dx2, dy2)
+    const denom = dx1 * dy2 - dx2 * dy1;
+    if (Math.abs(denom) < 1e-6) {
+      return null; // Lines are parallel
+    }
+    
+    const t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / denom;
+    const x = x1 + t * dx1;
+    const y = y1 + t * dy1;
+    
+    // Convert back to lat/lon
+    const lat = Math.asin(y / R) * 180 / Math.PI;
+    const lon = Math.atan2(y, x) * 180 / Math.PI;
+    
+    return { lat, lon };
+  }
+  
+  return null;
+}
+
+/**
+ * Calculate fusion quality metric (0-1)
+ * Based on intersection angles, cone widths, and confidences
+ */
+function calculateFusionQuality(cones) {
+  if (cones.length < 2) return 0;
+  
+  let quality = 1.0;
+  
+  // Penalize wide cones
+  cones.forEach(cone => {
+    const width = cone.cone_width_deg || 45;
+    if (width > 45) quality *= 0.8;
+    if (width > 90) quality *= 0.5;
+  });
+  
+  // Penalize low confidence
+  cones.forEach(cone => {
+    const conf = cone.confidence || 0.5;
+    quality *= conf;
+  });
+  
+  // Reward good intersection angles (60-120 degrees is ideal)
+  if (cones.length >= 2) {
+    // Simplified: assume nodes are reasonably spaced
+    quality *= 0.9; // Good baseline
+  }
+  
+  return Math.max(0, Math.min(1, quality));
+}
+
+/**
+ * Convert GPS coordinates to canvas pixels
+ * Note: canvas context is already scaled by DPR, so use display dimensions
+ */
+function gpsToCanvas(lat, lon, bounds, canvasWidth, canvasHeight) {
+  const latRange = bounds.maxLat - bounds.minLat;
+  const lonRange = bounds.maxLon - bounds.minLon;
+  
+  const x = ((lon - bounds.minLon) / lonRange) * canvasWidth;
+  const y = ((bounds.maxLat - lat) / latRange) * canvasHeight;
+  
+  return { x, y };
+}
+
+// Track if canvas has been initialized to avoid repeated scaling
+let aoaFusionCanvasInitialized = false;
+
+/**
+ * Resize AoA fusion canvas to match display size
+ * Only resizes when actually needed (window resize or first time)
+ */
+function resizeAoAFusionCanvas() {
+  if (!aoaFusionCanvas || !aoaFusionCtx) return;
+  
+  const dpr = window.devicePixelRatio || 1;
+  const rect = aoaFusionCanvas.getBoundingClientRect();
+  const displayWidth = rect.width;
+  const displayHeight = rect.height;
+  
+  // Skip if dimensions are invalid
+  if (displayWidth <= 0 || displayHeight <= 0) return;
+  
+  // Only resize if dimensions actually changed (with small threshold)
+  if (aoaFusionCanvas.width > 0 && aoaFusionCanvas.height > 0) {
+    const currentWidth = aoaFusionCanvas.width / dpr;
+    const currentHeight = aoaFusionCanvas.height / dpr;
+    
+    if (Math.abs(currentWidth - displayWidth) < 2 && Math.abs(currentHeight - displayHeight) < 2 && aoaFusionCanvasInitialized) {
+      return; // No resize needed
+    }
+  }
+  
+  // Set display size (CSS controls this)
+  aoaFusionCanvas.style.width = displayWidth + "px";
+  aoaFusionCanvas.style.height = displayHeight + "px";
+  
+  // Set actual canvas size (accounting for DPR)
+  const newWidth = Math.floor(displayWidth * dpr);
+  const newHeight = Math.floor(displayHeight * dpr);
+  
+  // Only resize if dimensions actually changed
+  if (aoaFusionCanvas.width !== newWidth || aoaFusionCanvas.height !== newHeight) {
+    aoaFusionCanvas.width = newWidth;
+    aoaFusionCanvas.height = newHeight;
+    
+    // Reset transform and re-scale
+    aoaFusionCtx.setTransform(1, 0, 0, 1, 0, 0);
+    aoaFusionCtx.scale(dpr, dpr);
+    
+    aoaFusionCanvasInitialized = true;
+  }
+}
+
+/**
+ * Draw AoA fusion visualization on canvas
+ */
+function drawAoAFusion(cones) {
+  if (!aoaFusionCanvas || !aoaFusionCtx) return;
+  
+  // Resize canvas if needed (only when dimensions change)
+  resizeAoAFusionCanvas();
+  
+  const canvas = aoaFusionCanvas;
+  const ctx = aoaFusionCtx;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  
+  // Clear canvas (context is already scaled by DPR)
+  ctx.fillStyle = "#070a0f";
+  ctx.fillRect(0, 0, width, height);
+  
+  if (!cones || cones.length === 0) {
+    ctx.fillStyle = "#7f8fa6";
+    ctx.font = "14px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("Waiting for AoA cones...", width / 2, height / 2);
+    return;
+  }
+  
+  // Filter cones with GPS data
+  const validCones = cones.filter(c => c.gps && c.gps.lat && c.gps.lon && c.bearing_deg != null);
+  
+  if (validCones.length === 0) {
+    ctx.fillStyle = "#ff8c00";
+    ctx.font = "12px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("No GPS data available", width / 2, height / 2);
+    return;
+  }
+  
+  // Calculate bounds (with padding)
+  let minLat = Infinity, maxLat = -Infinity;
+  let minLon = Infinity, maxLon = -Infinity;
+  
+  validCones.forEach(cone => {
+    const lat = cone.gps.lat;
+    const lon = cone.gps.lon;
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+    minLon = Math.min(minLon, lon);
+    maxLon = Math.max(maxLon, lon);
+  });
+  
+  // Add padding (10% on each side)
+  const latPadding = (maxLat - minLat) * 0.1 || 0.001;
+  const lonPadding = (maxLon - minLon) * 0.1 || 0.001;
+  minLat -= latPadding;
+  maxLat += latPadding;
+  minLon -= lonPadding;
+  maxLon += lonPadding;
+  
+  const bounds = { minLat, maxLat, minLon, maxLon };
+  
+  // Draw nodes and bearing lines
+  validCones.forEach((cone, idx) => {
+    const nodePos = gpsToCanvas(cone.gps.lat, cone.gps.lon, bounds, width, height);
+    const nodeX = nodePos.x;
+    const nodeY = nodePos.y;
+    const bearing = cone.bearing_deg;
+    const coneWidth = cone.cone_width_deg || 45;
+    const color = NODE_COLORS[idx % NODE_COLORS.length];
+    
+    // Draw node point
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(nodeX, nodeY, 6, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Draw node label
+    ctx.fillStyle = color;
+    ctx.font = "10px system-ui";
+    ctx.textAlign = "left";
+    ctx.fillText(cone.callsign || cone.node_id, nodeX + 8, nodeY - 4);
+    
+    // Draw bearing line (extend to edge of canvas)
+    const bearingRad = (bearing - 90) * Math.PI / 180; // Convert to screen coordinates
+    const lineLength = Math.max(width, height) * 1.5;
+    const endX = nodeX + Math.cos(bearingRad) * lineLength;
+    const endY = nodeY + Math.sin(bearingRad) * lineLength;
+    
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(nodeX, nodeY);
+    ctx.lineTo(endX, endY);
+    ctx.stroke();
+    
+    // Draw cone sector (semi-transparent)
+    const halfCone = (coneWidth / 2) * Math.PI / 180;
+    const brg1 = bearingRad - halfCone;
+    const brg2 = bearingRad + halfCone;
+    
+    ctx.fillStyle = color + "30"; // 30 = ~19% opacity
+    ctx.beginPath();
+    ctx.moveTo(nodeX, nodeY);
+    ctx.lineTo(nodeX + Math.cos(brg1) * lineLength, nodeY + Math.sin(brg1) * lineLength);
+    ctx.arc(nodeX, nodeY, lineLength, brg1, brg2);
+    ctx.closePath();
+    ctx.fill();
+  });
+  
+  // Calculate and draw intersection point(s)
+  if (validCones.length >= 2) {
+    const intersections = [];
+    
+    // Calculate intersections between all pairs
+    for (let i = 0; i < validCones.length; i++) {
+      for (let j = i + 1; j < validCones.length; j++) {
+        const cone1 = validCones[i];
+        const cone2 = validCones[j];
+        const node1 = { gps: cone1.gps };
+        const node2 = { gps: cone2.gps };
+        
+        const intersection = calculateIntersection(
+          node1, cone1.bearing_deg,
+          node2, cone2.bearing_deg
+        );
+        
+        if (intersection) {
+          intersections.push(intersection);
+        }
+      }
+    }
+    
+    // Draw intersection points and TAI (Targeted Area of Interest)
+    if (intersections.length > 0) {
+      // Average all intersections for final point
+      const avgLat = intersections.reduce((sum, p) => sum + p.lat, 0) / intersections.length;
+      const avgLon = intersections.reduce((sum, p) => sum + p.lon, 0) / intersections.length;
+      
+      const fusionPos = gpsToCanvas(avgLat, avgLon, bounds, width, height);
+      const fusionX = fusionPos.x;
+      const fusionY = fusionPos.y;
+      
+      // Calculate TAI size based on confidence and cone widths
+      // Lower confidence = larger uncertainty area
+      // Wider cones = larger uncertainty area
+      const avgConfidence = validCones.reduce((sum, c) => sum + (c.confidence || 0.5), 0) / validCones.length;
+      const avgConeWidth = validCones.reduce((sum, c) => sum + (c.cone_width_deg || 45), 0) / validCones.length;
+      
+      // Base radius on confidence (inverse relationship)
+      // Confidence 1.0 = small radius (20px), Confidence 0.0 = large radius (80px)
+      const baseRadius = 20 + (1.0 - avgConfidence) * 60;
+      
+      // Adjust for cone width (wider = larger)
+      const widthMultiplier = 1.0 + (avgConeWidth / 90.0); // 45deg = 1.5x, 90deg = 2x
+      const taiRadius = baseRadius * widthMultiplier;
+      
+      // Clamp radius to reasonable bounds
+      const minRadius = 15;
+      const maxRadius = Math.min(width, height) * 0.3; // Max 30% of canvas
+      const finalRadius = Math.max(minRadius, Math.min(maxRadius, taiRadius));
+      
+      // Draw TAI (Targeted Area of Interest) - yellow transparent area
+      ctx.fillStyle = "rgba(255, 255, 0, 0.3)"; // Yellow, 30% opacity
+      ctx.strokeStyle = "rgba(255, 255, 0, 0.6)"; // Yellow border, 60% opacity
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(fusionX, fusionY, finalRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      
+      // Draw TAI label
+      ctx.fillStyle = "rgba(255, 255, 0, 0.9)"; // Yellow text
+      ctx.font = "bold 12px system-ui";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("TAI", fusionX, fusionY - finalRadius - 12);
+      
+      // Draw intersection point (center of TAI)
+      ctx.fillStyle = "#3cff9e";
+      ctx.beginPath();
+      ctx.arc(fusionX, fusionY, 4, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Draw crosshair
+      ctx.strokeStyle = "#3cff9e";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(fusionX - 8, fusionY);
+      ctx.lineTo(fusionX + 8, fusionY);
+      ctx.moveTo(fusionX, fusionY - 8);
+      ctx.lineTo(fusionX, fusionY + 8);
+      ctx.stroke();
+    }
+  }
+}
+
+/**
+ * Update AoA fusion data display
+ */
+function updateAoAFusionData(cones) {
+  if (!aoaStatusEl || !aoaConesListEl || !aoaFusionResultEl) return;
+  
+  if (!cones || cones.length === 0) {
+    aoaStatusEl.textContent = "Waiting for cones...";
+    aoaConesListEl.innerHTML = "";
+    aoaFusionResultEl.innerHTML = "";
+    return;
+  }
+  
+  const validCones = cones.filter(c => c.gps && c.gps.lat && c.gps.lon);
+  
+  if (validCones.length === 0) {
+    aoaStatusEl.textContent = "No GPS data available";
+    aoaConesListEl.innerHTML = "";
+    aoaFusionResultEl.innerHTML = "";
+    return;
+  }
+  
+  // Update status
+  aoaStatusEl.textContent = `${validCones.length}/3 cones active`;
+  
+  // Update cones list
+  aoaConesListEl.innerHTML = validCones.map((cone, idx) => {
+    const bearing = (cone.bearing_deg || 0).toFixed(1);
+    const width = (cone.cone_width_deg || 45).toFixed(1);
+    const conf = ((cone.confidence || 0.5) * 100).toFixed(0);
+    const color = NODE_COLORS[idx % NODE_COLORS.length];
+    const age = cone.timestamp ? Math.round(Date.now() / 1000 - cone.timestamp) : 0;
+    
+    return `
+      <div class="aoa-cone-item">
+        <strong style="color: ${color}">${cone.callsign || cone.node_id}</strong>
+        Bearing: ${bearing}° | Width: ${width}° | Conf: ${conf}% | Age: ${age}s
+      </div>
+    `;
+  }).join("");
+  
+  // Calculate and display fusion result
+  if (validCones.length >= 2) {
+    const intersections = [];
+    for (let i = 0; i < validCones.length; i++) {
+      for (let j = i + 1; j < validCones.length; j++) {
+        const cone1 = validCones[i];
+        const cone2 = validCones[j];
+        const node1 = { gps: cone1.gps };
+        const node2 = { gps: cone2.gps };
+        
+        const intersection = calculateIntersection(
+          node1, cone1.bearing_deg,
+          node2, cone2.bearing_deg
+        );
+        
+        if (intersection) {
+          intersections.push(intersection);
+        }
+      }
+    }
+    
+    if (intersections.length > 0) {
+      const avgLat = intersections.reduce((sum, p) => sum + p.lat, 0) / intersections.length;
+      const avgLon = intersections.reduce((sum, p) => sum + p.lon, 0) / intersections.length;
+      const quality = calculateFusionQuality(validCones);
+      const qualityPercent = (quality * 100).toFixed(0);
+      
+      aoaFusionResultEl.innerHTML = `
+        <div class="fusion-label">Fused Location</div>
+        <div class="fusion-coords">${avgLat.toFixed(6)}, ${avgLon.toFixed(6)}</div>
+        <div class="fusion-quality">Quality: ${qualityPercent}%</div>
+      `;
+    } else {
+      aoaFusionResultEl.innerHTML = `<div class="fusion-label">Unable to calculate intersection</div>`;
+    }
+  } else {
+    aoaFusionResultEl.innerHTML = `<div class="fusion-label">Need 2+ cones for fusion</div>`;
+  }
+}
+
+/**
+ * Fetch and update AoA fusion data
+ */
+async function updateAoAFusion() {
+  try {
+    const response = await fetch("/api/tripwire/aoa-fusion");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    
+    drawAoAFusion(data.cones || []);
+    updateAoAFusionData(data.cones || []);
+  } catch (err) {
+    console.error("[AoA Fusion] Error fetching data:", err);
+    if (aoaStatusEl) {
+      aoaStatusEl.textContent = "Error loading data";
+    }
+  }
+}
+
+  // Start periodic updates (every 2 seconds)
+let aoaFusionInterval = null;
+
+function startAoAFusionUpdates() {
+  if (aoaFusionInterval) return;
+  // Resize canvas on window resize (debounced)
+  let resizeTimeout;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => {
+      resizeAoAFusionCanvas();
+      // Redraw after resize
+      if (aoaFusionInterval) {
+        updateAoAFusion();
+      }
+    }, 100);
+  });
+  resizeAoAFusionCanvas(); // Initial resize
+  updateAoAFusion(); // Initial update
+  aoaFusionInterval = setInterval(updateAoAFusion, 2000);
+}
+
+function stopAoAFusionUpdates() {
+  if (aoaFusionInterval) {
+    clearInterval(aoaFusionInterval);
+    aoaFusionInterval = null;
+  }
+}
+
 function updateTripwireLeds(count) {
   if (!tripwireLedsEl) return;
   tripwireLedsEl.innerHTML = "";
@@ -1501,17 +2036,109 @@ function initTakCollapse() {
   if (!takHeader || !takBody || !takCaret) return;
   takBody.classList.remove("open");
   takCaret.classList.remove("open");
-  takHeader.addEventListener("click", () => {
+  takHeader.addEventListener("click", (e) => {
+    e.stopPropagation();
     const open = takBody.classList.contains("open");
     takBody.classList.toggle("open", !open);
     takCaret.classList.toggle("open", !open);
   });
+  
+  // Close dropdown when clicking outside
+  document.addEventListener("click", (e) => {
+    if (takBody && takBody.classList.contains("open")) {
+      const dropdown = takHeader.closest(".top-dropdown");
+      if (dropdown && !dropdown.contains(e.target)) {
+        takBody.classList.remove("open");
+        takCaret.classList.remove("open");
+      }
+    }
+  });
+}
+
+// NETWORK CONFIG COLLAPSE & INIT
+// ------------------------------
+function initNetworkCollapse() {
+  if (!networkHeader || !networkBody || !networkCaret) return;
+  networkBody.classList.remove("open");
+  networkCaret.classList.remove("open");
+  networkHeader.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = networkBody.classList.contains("open");
+    networkBody.classList.toggle("open", !open);
+    networkCaret.classList.toggle("open", !open);
+    // Load current addresses when opening
+    if (open === false) {
+      loadNetworkConfig();
+    }
+  });
+  
+  // Close dropdown when clicking outside
+  document.addEventListener("click", (e) => {
+    if (networkBody && networkBody.classList.contains("open")) {
+      const dropdown = networkHeader.closest(".top-dropdown");
+      if (dropdown && !dropdown.contains(e.target)) {
+        networkBody.classList.remove("open");
+        networkCaret.classList.remove("open");
+      }
+    }
+  });
+}
+
+async function loadNetworkConfig() {
+  try {
+    const config = await API.getNetworkConfig();
+    if (config) {
+      if (l4tbr0Input && config.l4tbr0) {
+        l4tbr0Input.value = config.l4tbr0;
+      }
+      if (eth0Input && config.eth0) {
+        eth0Input.value = config.eth0;
+      }
+    }
+  } catch (e) {
+    console.error("[NETWORK] Failed to load config:", e);
+  }
+}
+
+async function setNetworkInterface(interfaceName) {
+  const input = interfaceName === "l4tbr0" ? l4tbr0Input : eth0Input;
+  if (!input) return;
+  
+  const address = input.value.trim();
+  if (!address) {
+    alert(`Please enter an address for ${interfaceName}`);
+    return;
+  }
+  
+  // Basic IP validation
+  const ipRegex = /^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$/;
+  if (!ipRegex.test(address)) {
+    alert(`Invalid IP address format: ${address}`);
+    return;
+  }
+  
+  try {
+    const result = await API.setNetworkInterface(interfaceName, address);
+    if (result.ok) {
+      console.log(`[NETWORK] Successfully set ${interfaceName} to ${address}`);
+      alert(`Successfully set ${interfaceName} to ${address}`);
+      // Reload config to show updated value
+      await loadNetworkConfig();
+    } else {
+      console.error(`[NETWORK] Failed to set ${interfaceName}:`, result.error);
+      alert(`Failed to set ${interfaceName}: ${result.error || "Unknown error"}`);
+    }
+  } catch (e) {
+    console.error(`[NETWORK] Error setting ${interfaceName}:`, e);
+    alert(`Error setting ${interfaceName}: ${e.message}`);
+  }
 }
 
 function init() {
   resizeCanvas(true);
   setEdgeMode("manual");
   initTakCollapse();
+  initNetworkCollapse();
   initTripwireCollapse();
   updateGainUiLock();
 
@@ -1519,6 +2146,11 @@ function init() {
   // INIT FIXED TRIPWIRE NODE CARDS (ALWAYS VISIBLE)
   // -------------------------------------------------
   initTripwireNodes();
+  
+  // -------------------------------------------------
+  // INIT AoA FUSION VISUALIZATION
+  // -------------------------------------------------
+  startAoAFusionUpdates();
 
   // -------------------------------------------------
   // UI wiring
@@ -1528,6 +2160,9 @@ function init() {
   if (gainModeSelect) gainModeSelect.addEventListener("change", updateGainUiLock);
   if (btnManual) btnManual.addEventListener("click", () => apiSetEdgeMode("manual"));
   if (btnArmed) btnArmed.addEventListener("click", () => apiSetEdgeMode("armed"));
+  
+  if (btnSetL4tbr0) btnSetL4tbr0.addEventListener("click", () => setNetworkInterface("l4tbr0"));
+  if (btnSetEth0) btnSetEth0.addEventListener("click", () => setNetworkInterface("eth0"));
   
   // Waterfall brightness/contrast controls
   if (wfBrightnessSlider) {

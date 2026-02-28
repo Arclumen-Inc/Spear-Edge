@@ -24,9 +24,10 @@
     <!-- RIGHT: STATUS + CONTROLS -->
     <div id="topRightCluster">
 
-      <!-- MODE INDICATOR -->
-      <div id="modePill" class="mode-pill manual">
-        MODE: MANUAL
+      <!-- EDGE MODE BUTTONS -->
+      <div class="mode-buttons-top">
+        <button id="btnManual" class="mode-btn">MANUAL</button>
+        <button id="btnArmed" class="mode-btn">ARMED</button>
       </div>
 
       <!-- STATUS LED BLOCK -->
@@ -46,6 +47,61 @@
         <div class="status-item">
           <div class="led" id="takLed"></div>
           <span>TAK</span>
+        </div>
+      </div>
+
+      <!-- TAK SERVER CONFIG DROPDOWN -->
+      <div class="top-dropdown">
+        <div class="top-dropdown-header collapsible" id="takHeaderTop">
+          <span class="caret">&#9654;</span>
+          <span>TAK Server Config</span>
+        </div>
+        <div id="takBodyTop" class="top-dropdown-content collapse">
+          <div class="top-dropdown-inner">
+            <label>
+              TAK Server
+              <input type="text" id="takHostInput" placeholder="10.0.0.10">
+            </label>
+            <label>
+              TAK Port
+              <input type="number" id="takPortInput" value="8089">
+            </label>
+            <div class="btn-row">
+              <button id="btnTakConnect">Connect</button>
+            </div>
+            <hr class="subdivider">
+            <label>
+              Edge Callsign
+              <input type="text" id="callsignInput" placeholder="Optional">
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- EDGE NETWORK CONFIG DROPDOWN -->
+      <div class="top-dropdown">
+        <div class="top-dropdown-header collapsible" id="networkHeaderTop">
+          <span class="caret">&#9654;</span>
+          <span>Edge Network Config</span>
+        </div>
+        <div id="networkBodyTop" class="top-dropdown-content collapse">
+          <div class="top-dropdown-inner">
+            <label>
+              l4tbr0 Address
+              <input type="text" id="l4tbr0Input" placeholder="192.168.1.100">
+            </label>
+            <div class="btn-row">
+              <button id="btnSetL4tbr0">Set l4tbr0</button>
+            </div>
+            <hr class="subdivider">
+            <label>
+              eth0 Address
+              <input type="text" id="eth0Input" placeholder="10.0.0.1">
+            </label>
+            <div class="btn-row">
+              <button id="btnSetEth0">Set eth0</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -259,16 +315,19 @@
     </div>
     <!-- ===================== RIGHT COLUMN ===================== -->
     <div id="rightColumn">
-    
-      <!-- EDGE MODE -->
+      
+      <!-- AoA FUSION PANEL -->
       <div class="panel">
-        <div class="panel-header">Edge Mode</div>
+        <div class="panel-header">AoA Fusion</div>
         <div class="panel-body">
-          <div class="mode-buttons">
-            <button id="btnManual" class="mode-btn">MANUAL</button>
-            <button id="btnArmed" class="mode-btn">ARMED</button>
+          <div id="aoaFusionContainer">
+            <canvas id="aoaFusionCanvas"></canvas>
+            <div id="aoaFusionData" class="aoa-fusion-data">
+              <div class="aoa-status" id="aoaStatus">Waiting for cones...</div>
+              <div id="aoaConesList" class="aoa-cones-list"></div>
+              <div id="aoaFusionResult" class="aoa-fusion-result"></div>
+            </div>
           </div>
-          <div class="small-note" id="edgeModeLabel">Mode: unknown</div>
         </div>
       </div>
       
@@ -286,32 +345,6 @@
           <div class="small-note">
             Nodes identified by <code>node_id</code> (tripwire-XX)
           </div>
-        </div>
-      </div>
-
-      <!-- TAK & INTEGRATIONS -->
-      <div class="panel" style="margin-top:12px;">
-        <div class="panel-header collapsible" id="takHeader">
-          <span class="caret">&#9654;</span>
-          TAK & Integrations
-        </div>
-        <div id="takBody" class="collapse">
-          <label>
-            TAK Server
-            <input type="text" id="takHostInput" placeholder="10.0.0.10">
-          </label>
-          <label>
-            TAK Port
-            <input type="number" id="takPortInput" value="8089">
-          </label>
-          <div class="btn-row">
-            <button id="btnTakConnect">Connect</button>
-          </div>
-          <hr class="subdivider">
-          <label>
-            Edge Callsign
-            <input type="text" id="callsignInput" placeholder="Optional">
-          </label>
         </div>
       </div>
 
