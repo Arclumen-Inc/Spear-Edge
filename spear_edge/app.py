@@ -7,7 +7,7 @@ from spear_edge.settings import settings
 from spear_edge.core.orchestrator.orchestrator import Orchestrator
 from spear_edge.core.capture.capture_manager import CaptureManager
 
-from spear_edge.core.sdr.soapy import SoapySDRDevice
+from spear_edge.core.sdr.bladerf_native import BladeRFNativeDevice
 from spear_edge.core.sdr.mock import MockSDR
 
 from spear_edge.api.http.routes_health import router as health_router
@@ -32,9 +32,9 @@ from spear_edge.api.http.routes_capture import bind as bind_capture
 # ------------------------------------------------------------
 def make_sdr():
     try:
-        return SoapySDRDevice()
+        return BladeRFNativeDevice()
     except Exception as e:
-        print(f"[SDR] SoapySDR init failed, falling back to MockSDR: {e}")
+        print(f"[SDR] libbladerf init failed, falling back to MockSDR: {e}")
         return MockSDR()
 
 

@@ -11,6 +11,7 @@ _TOPICS = (
     "capture_progress",
     "capture_complete",
     "aoa_cone",  # AoA cone updates (v2.0)
+    "classification_result",  # ML classification results
 )
 
 

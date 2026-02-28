@@ -34,7 +34,7 @@
       <div id="statusBlock">
         <div class="status-item">
           <div class="led" id="wsLed"></div>
-          <span>Link</span>
+          <span>COT</span>
         </div>
         <div class="status-item">
           <div class="led" id="sdrLed"></div>
@@ -47,6 +47,25 @@
         <div class="status-item">
           <div class="led" id="takLed"></div>
           <span>TAK</span>
+        </div>
+      </div>
+
+      <!-- TRIPWIRE NODES DROPDOWN -->
+      <div class="top-dropdown">
+        <div class="top-dropdown-header collapsible" id="tripwireHeaderTop">
+          <span class="caret">&#9654;</span>
+          <span>Tripwire Nodes</span>
+          <div id="tripwireLedsTop" class="tripwire-leds-collapsed"></div>
+        </div>
+        <div id="tripwireBodyTop" class="top-dropdown-content collapse">
+          <div class="top-dropdown-inner">
+            <div id="tripwireNodesTop" class="nodes-list">
+              <!-- Injected by JS -->
+            </div>
+            <div class="small-note">
+              Nodes identified by <code>node_id</code> (tripwire-XX)
+            </div>
+          </div>
         </div>
       </div>
 
@@ -219,7 +238,7 @@
             </select>
           </label>
 
-          <label style="grid-column: 1 / -1;">
+          <label>
             Gain (dB)
             <input type="range" id="gainSlider" min="0" max="70" value="30">
           </label>
@@ -330,20 +349,13 @@
           </div>
         </div>
       </div>
-      
-      <!-- TRIPWIRE NODES (DYNAMIC LIST) -->
+
+      <!-- ML CLASSIFICATIONS PANEL -->
       <div class="panel">
-        <div class="panel-header collapsible" id="tripwireHeader">
-          <span class="caret">&#9654;</span>
-          Tripwire Nodes
-          <div id="tripwireLeds" class="tripwire-leds-collapsed"></div>
-        </div>
-        <div id="tripwireBody" class="collapse">
-          <div id="tripwireNodes" class="nodes-list">
-            <!-- Injected by JS -->
-          </div>
-          <div class="small-note">
-            Nodes identified by <code>node_id</code> (tripwire-XX)
+        <div class="panel-header">ML Classifications</div>
+        <div class="panel-body">
+          <div id="mlClassificationsList" class="ml-classifications-list">
+            <div class="muted">No classifications yet...</div>
           </div>
         </div>
       </div>

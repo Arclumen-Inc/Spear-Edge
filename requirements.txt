@@ -5,3 +5,4 @@ numpy>=1.23,<2.0
 python-dotenv
 websockets>=11
 onnxruntime>=1.16.0
+requests>=2.28.0

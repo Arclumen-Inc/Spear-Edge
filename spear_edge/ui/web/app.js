@@ -17,11 +17,11 @@ const canvas            = document.getElementById("spec");
 const ctx               = canvas ? canvas.getContext("2d") : null;
 const startBtn          = document.getElementById("start");
 const stopBtn           = document.getElementById("stop");
-const tripwireNodesEl   = document.getElementById("tripwireNodes");
-const tripwireHeader    = document.getElementById("tripwireHeader");
-const tripwireBody      = document.getElementById("tripwireBody");
+const tripwireNodesEl   = document.getElementById("tripwireNodesTop");
+const tripwireHeader    = document.getElementById("tripwireHeaderTop");
+const tripwireBody      = document.getElementById("tripwireBodyTop");
 const tripwireCaret     = tripwireHeader ? tripwireHeader.querySelector(".caret") : null;
-const tripwireLedsEl    = document.getElementById("tripwireLeds");
+const tripwireLedsEl    = document.getElementById("tripwireLedsTop");
 const cueListEl         = document.getElementById("cueList");
 const captureLogEl      = document.getElementById("captureLog");
 const taskBanner        = document.getElementById("taskBanner");
@@ -45,6 +45,7 @@ const aoaFusionCtx      = aoaFusionCanvas ? aoaFusionCanvas.getContext("2d") : n
 const aoaStatusEl       = document.getElementById("aoaStatus");
 const aoaConesListEl    = document.getElementById("aoaConesList");
 const aoaFusionResultEl = document.getElementById("aoaFusionResult");
+const mlClassificationsEl = document.getElementById("mlClassificationsList");
 const captureBanner     = document.getElementById("captureBanner");
 const captureProgressBar = document.getElementById("captureProgressBar");
 const wsLed             = document.getElementById("wsLed");
@@ -202,6 +203,11 @@ let lastCanvasH         = 0;
 // OPERATOR CUE QUEUE (fixed + robust)
 // ------------------------------
 const cueBuffer = []; // newest first, max 10
+
+// ------------------------------
+// ML CLASSIFICATIONS BUFFER
+// ------------------------------
+const classificationBuffer = []; // newest first, max 15
 
 function addCue(ev) {
   // Deduplication: ignore near-identical cues within 5s
@@ -1050,7 +1056,9 @@ function startNotifyWs() {
         }
       }
 
-      // You can add more message types here later (e.g. classification_result)
+      if (msg.type === "classification_result") {
+        addClassification(msg.payload);
+      }
 
     } catch (err) {
       console.warn("[NOTIFY WS] Failed to parse message:", err, e.data);
@@ -1266,8 +1274,7 @@ function updateSdrHealth(health) {
     }
     if (errorsEl) {
       const errors = (typeof health.errors === "number") ? health.errors : 0;
-      const timeouts = (typeof health.timeouts === "number") ? health.timeouts : 0;
-      errorsEl.textContent = `${errors} err, ${timeouts} timeout`;
+      errorsEl.textContent = `${errors}`;
     }
     if (readsEl) {
       const reads = health.reads || {};
@@ -2141,7 +2148,7 @@ function initTripwireCollapse() {
     return;
   }
   
-  // Start closed (collapsed) - panel hidden, LEDs visible
+  // Start closed (collapsed) - matches top dropdown pattern
   tripwireBody.classList.remove("open");
   tripwireCaret.classList.remove("open");
   
@@ -2159,7 +2166,31 @@ function initTripwireCollapse() {
     const open = tripwireBody.classList.contains("open");
     tripwireBody.classList.toggle("open", !open);
     tripwireCaret.classList.toggle("open", !open);
-    console.log("[TW] Panel toggled, open:", !open);
+    
+    // Close other top dropdowns when this one opens (like other top dropdowns)
+    if (!open) {
+      const otherDropdowns = document.querySelectorAll(".top-dropdown-content");
+      otherDropdowns.forEach(dropdown => {
+        if (dropdown !== tripwireBody && dropdown.classList.contains("open")) {
+          dropdown.classList.remove("open");
+          const otherHeader = dropdown.previousElementSibling;
+          if (otherHeader) {
+            const otherCaret = otherHeader.querySelector(".caret");
+            if (otherCaret) {
+              otherCaret.classList.remove("open");
+            }
+          }
+        }
+      });
+    }
+  });
+  
+  // Add click-outside-to-close listener (like other top dropdowns)
+  document.addEventListener("click", (e) => {
+    if (!tripwireHeader.contains(e.target) && !tripwireBody.contains(e.target)) {
+      tripwireBody.classList.remove("open");
+      tripwireCaret.classList.remove("open");
+    }
   });
   
   console.log("[TW] Tripwire collapse initialized");
@@ -2224,6 +2255,80 @@ async function pollCaptures() {
     const j = await API.captures();
     renderCaptureLog(j?.captures || []);
   } catch (_) {}
+}
+
+// ------------------------------
+// ML CLASSIFICATIONS
+// ------------------------------
+function addClassification(classification) {
+  if (!classification || typeof classification !== "object") {
+    return;
+  }
+
+  // Add timestamp if not present
+  if (!classification.ts) {
+    classification.ts = Date.now() / 1000;
+  }
+
+  // Add to buffer (newest first)
+  classificationBuffer.unshift(classification);
+  
+  // Keep only last 15 classifications
+  if (classificationBuffer.length > 15) {
+    classificationBuffer.pop();
+  }
+
+  renderClassifications();
+}
+
+function renderClassifications() {
+  if (!mlClassificationsEl) return;
+
+  if (classificationBuffer.length === 0) {
+    mlClassificationsEl.innerHTML = '<div class="muted">No classifications yet...</div>';
+    return;
+  }
+
+  mlClassificationsEl.innerHTML = classificationBuffer.map((cls, idx) => {
+    const label = (cls.label || "UNKNOWN").toUpperCase().replace(/_/g, " ");
+    const confidence = (cls.confidence || 0) * 100;
+    const freqMHz = cls.freq_hz ? (cls.freq_hz / 1e6).toFixed(3) : "—";
+    const sourceNode = cls.source_node || "—";
+    
+    // Calculate time ago
+    const now = Date.now() / 1000;
+    const timeAgo = now - (cls.ts || now);
+    let timeAgoStr = "";
+    if (timeAgo < 60) {
+      timeAgoStr = `${Math.round(timeAgo)}s ago`;
+    } else if (timeAgo < 3600) {
+      timeAgoStr = `${Math.round(timeAgo / 60)}m ago`;
+    } else {
+      timeAgoStr = `${Math.round(timeAgo / 3600)}h ago`;
+    }
+
+    // Determine confidence class
+    let confidenceClass = "low-confidence";
+    if (confidence >= 80) {
+      confidenceClass = "high-confidence";
+    } else if (confidence >= 50) {
+      confidenceClass = "medium-confidence";
+    }
+
+    return `
+      <div class="ml-classification-card ${confidenceClass}">
+        <div class="ml-label">${label}</div>
+        <div class="ml-details">
+          <span>${freqMHz} MHz</span>
+          <span class="ml-confidence">${confidence.toFixed(0)}%</span>
+        </div>
+        <div class="ml-meta">
+          <span>${sourceNode}</span>
+          <span>${timeAgoStr}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 // ------------------------------
