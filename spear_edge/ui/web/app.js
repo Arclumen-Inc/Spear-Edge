@@ -1532,19 +1532,58 @@ function calculateFusionQuality(cones) {
 /**
  * Convert GPS coordinates to canvas pixels
  * Note: canvas context is already scaled by DPR, so use display dimensions
+ * Accounts for zoom and pan transformations
  */
 function gpsToCanvas(lat, lon, bounds, canvasWidth, canvasHeight) {
   const latRange = bounds.maxLat - bounds.minLat;
   const lonRange = bounds.maxLon - bounds.minLon;
   
-  const x = ((lon - bounds.minLon) / lonRange) * canvasWidth;
-  const y = ((bounds.maxLat - lat) / latRange) * canvasHeight;
+  // Calculate base coordinates (0-1 normalized)
+  const normalizedX = (lon - bounds.minLon) / lonRange;
+  const normalizedY = (bounds.maxLat - lat) / latRange;
+  
+  // Apply zoom and pan
+  const centerX = canvasWidth / 2;
+  const centerY = canvasHeight / 2;
+  
+  // Transform: scale around center, then translate
+  const x = (normalizedX * canvasWidth - centerX) * aoaFusionZoom + centerX + aoaFusionPanX;
+  const y = (normalizedY * canvasHeight - centerY) * aoaFusionZoom + centerY + aoaFusionPanY;
   
   return { x, y };
 }
 
+/**
+ * Convert canvas pixel coordinates to GPS coordinates (for click-to-zoom/pan)
+ */
+function canvasToGps(canvasX, canvasY, bounds, canvasWidth, canvasHeight) {
+  const centerX = canvasWidth / 2;
+  const centerY = canvasHeight / 2;
+  
+  // Reverse transform: subtract pan, then unscale
+  const normalizedX = ((canvasX - centerX - aoaFusionPanX) / aoaFusionZoom + centerX) / canvasWidth;
+  const normalizedY = ((canvasY - centerY - aoaFusionPanY) / aoaFusionZoom + centerY) / canvasHeight;
+  
+  const latRange = bounds.maxLat - bounds.minLat;
+  const lonRange = bounds.maxLon - bounds.minLon;
+  
+  const lon = bounds.minLon + normalizedX * lonRange;
+  const lat = bounds.maxLat - normalizedY * latRange;
+  
+  return { lat, lon };
+}
+
 // Track if canvas has been initialized to avoid repeated scaling
 let aoaFusionCanvasInitialized = false;
+
+// Zoom and pan state for AoA fusion canvas
+let aoaFusionZoom = 1.0;
+let aoaFusionPanX = 0;
+let aoaFusionPanY = 0;
+let aoaFusionIsPanning = false;
+let aoaFusionPanStartX = 0;
+let aoaFusionPanStartY = 0;
+let aoaFusionBounds = null; // Store bounds for coordinate transformation
 
 /**
  * Resize AoA fusion canvas to match display size
@@ -1653,8 +1692,9 @@ function drawAoAFusion(cones) {
   maxLon += lonPadding;
   
   const bounds = { minLat, maxLat, minLon, maxLon };
+  aoaFusionBounds = bounds; // Store for coordinate transformations
   
-  // Draw nodes and bearing lines
+  // Draw nodes and bearing lines (coordinates are already transformed in gpsToCanvas)
   validCones.forEach((cone, idx) => {
     const nodePos = gpsToCanvas(cone.gps.lat, cone.gps.lon, bounds, width, height);
     const nodeX = nodePos.x;
@@ -1689,12 +1729,12 @@ function drawAoAFusion(cones) {
     ctx.lineTo(endX, endY);
     ctx.stroke();
     
-    // Draw cone sector (semi-transparent)
+    // Draw cone sector (semi-transparent) - draw first so TAI appears on top
     const halfCone = (coneWidth / 2) * Math.PI / 180;
     const brg1 = bearingRad - halfCone;
     const brg2 = bearingRad + halfCone;
     
-    ctx.fillStyle = color + "30"; // 30 = ~19% opacity
+    ctx.fillStyle = color + "20"; // 20 = ~12% opacity (reduced so TAI is more visible)
     ctx.beginPath();
     ctx.moveTo(nodeX, nodeY);
     ctx.lineTo(nodeX + Math.cos(brg1) * lineLength, nodeY + Math.sin(brg1) * lineLength);
@@ -1703,7 +1743,7 @@ function drawAoAFusion(cones) {
     ctx.fill();
   });
   
-  // Calculate and draw intersection point(s)
+  // Calculate and draw TAI (Targeted Area of Interest) FIRST, then intersection point
   if (validCones.length >= 2) {
     const intersections = [];
     
@@ -1750,44 +1790,199 @@ function drawAoAFusion(cones) {
       const widthMultiplier = 1.0 + (avgConeWidth / 90.0); // 45deg = 1.5x, 90deg = 2x
       const taiRadius = baseRadius * widthMultiplier;
       
-      // Clamp radius to reasonable bounds
-      const minRadius = 15;
-      const maxRadius = Math.min(width, height) * 0.3; // Max 30% of canvas
+      // Clamp radius to reasonable bounds (ensure minimum visibility)
+      const minRadius = 25; // Increased minimum for better visibility
+      const maxRadius = Math.min(width, height) * 0.4; // Max 40% of canvas
       const finalRadius = Math.max(minRadius, Math.min(maxRadius, taiRadius));
       
       // Draw TAI (Targeted Area of Interest) - yellow transparent area
-      ctx.fillStyle = "rgba(255, 255, 0, 0.3)"; // Yellow, 30% opacity
-      ctx.strokeStyle = "rgba(255, 255, 0, 0.6)"; // Yellow border, 60% opacity
-      ctx.lineWidth = 2;
+      // Draw filled circle first
+      ctx.fillStyle = "rgba(255, 255, 0, 0.4)"; // Yellow, 40% opacity (more visible)
       ctx.beginPath();
       ctx.arc(fusionX, fusionY, finalRadius, 0, Math.PI * 2);
       ctx.fill();
+      
+      // Draw border
+      ctx.strokeStyle = "rgba(255, 255, 0, 0.8)"; // Yellow border, 80% opacity
+      ctx.lineWidth = 3; // Thicker border
+      ctx.beginPath();
+      ctx.arc(fusionX, fusionY, finalRadius, 0, Math.PI * 2);
       ctx.stroke();
       
-      // Draw TAI label
-      ctx.fillStyle = "rgba(255, 255, 0, 0.9)"; // Yellow text
+      // Draw TAI label with background for visibility
+      ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.fillRect(fusionX - 20, fusionY - finalRadius - 25, 40, 18);
+      ctx.fillStyle = "rgba(255, 255, 0, 1.0)"; // Yellow text, fully opaque
       ctx.font = "bold 12px system-ui";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("TAI", fusionX, fusionY - finalRadius - 12);
+      ctx.fillText("TAI", fusionX, fusionY - finalRadius - 16);
       
-      // Draw intersection point (center of TAI)
+      // Draw intersection point (center of TAI) - draw on top
       ctx.fillStyle = "#3cff9e";
       ctx.beginPath();
-      ctx.arc(fusionX, fusionY, 4, 0, Math.PI * 2);
+      ctx.arc(fusionX, fusionY, 5, 0, Math.PI * 2); // Slightly larger
       ctx.fill();
       
       // Draw crosshair
       ctx.strokeStyle = "#3cff9e";
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 2; // Thicker crosshair
       ctx.beginPath();
-      ctx.moveTo(fusionX - 8, fusionY);
-      ctx.lineTo(fusionX + 8, fusionY);
-      ctx.moveTo(fusionX, fusionY - 8);
-      ctx.lineTo(fusionX, fusionY + 8);
+      ctx.moveTo(fusionX - 10, fusionY);
+      ctx.lineTo(fusionX + 10, fusionY);
+      ctx.moveTo(fusionX, fusionY - 10);
+      ctx.lineTo(fusionX, fusionY + 10);
       ctx.stroke();
+      
+      // Store TAI data for ATAK integration
+      window._lastTAI = {
+        lat: avgLat,
+        lon: avgLon,
+        radius_m: finalRadius * (bounds.maxLat - bounds.minLat) * 111000 / height, // Approximate meters
+        confidence: avgConfidence,
+        quality: calculateFusionQuality(validCones),
+        timestamp: Date.now() / 1000
+      };
     }
   }
+  
+  // Draw zoom/pan controls overlay (not affected by transform)
+  drawZoomPanControls(ctx, width, height);
+}
+
+/**
+ * Draw zoom/pan control overlay
+ */
+function drawZoomPanControls(ctx, width, height) {
+  // Reset button
+  ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+  ctx.fillRect(width - 100, 10, 90, 30);
+  ctx.strokeStyle = "#3cff9e";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(width - 100, 10, 90, 30);
+  ctx.fillStyle = "#3cff9e";
+  ctx.font = "11px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("Reset View", width - 55, 25);
+  
+  // Zoom level indicator
+  ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+  ctx.fillRect(10, 10, 80, 20);
+  ctx.fillStyle = "#7f8fa6";
+  ctx.font = "10px system-ui";
+  ctx.textAlign = "left";
+  ctx.fillText(`Zoom: ${(aoaFusionZoom * 100).toFixed(0)}%`, 15, 23);
+}
+
+/**
+ * Reset zoom and pan to default
+ */
+function resetAoAFusionView() {
+  aoaFusionZoom = 1.0;
+  aoaFusionPanX = 0;
+  aoaFusionPanY = 0;
+  if (aoaFusionInterval) {
+    updateAoAFusion(); // Redraw
+  }
+}
+
+/**
+ * Initialize zoom and pan event handlers for AoA fusion canvas
+ */
+function initAoAFusionZoomPan() {
+  if (!aoaFusionCanvas) return;
+  
+  // Mouse wheel zoom
+  aoaFusionCanvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    
+    const rect = aoaFusionCanvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    // Zoom factor
+    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    const newZoom = Math.max(0.5, Math.min(5.0, aoaFusionZoom * zoomFactor));
+    
+    // Zoom toward mouse position
+    const zoomChange = newZoom / aoaFusionZoom;
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    
+    // Adjust pan to zoom toward mouse
+    aoaFusionPanX = mouseX - (mouseX - centerX - aoaFusionPanX) * zoomChange - centerX;
+    aoaFusionPanY = mouseY - (mouseY - centerY - aoaFusionPanY) * zoomChange - centerY;
+    
+    aoaFusionZoom = newZoom;
+    
+    if (aoaFusionInterval) {
+      updateAoAFusion(); // Redraw
+    }
+  }, { passive: false });
+  
+  // Mouse pan
+  aoaFusionCanvas.addEventListener("mousedown", (e) => {
+    // Only pan with left button, and not on reset button
+    if (e.button !== 0) return;
+    const rect = aoaFusionCanvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    
+    // Check if clicking on reset button
+    if (clickX >= rect.width - 100 && clickX <= rect.width - 10 &&
+        clickY >= 10 && clickY <= 40) {
+      resetAoAFusionView();
+      return;
+    }
+    
+    aoaFusionIsPanning = true;
+    aoaFusionPanStartX = e.clientX - aoaFusionPanX;
+    aoaFusionPanStartY = e.clientY - aoaFusionPanY;
+    aoaFusionCanvas.style.cursor = "grabbing";
+  });
+  
+  aoaFusionCanvas.addEventListener("mousemove", (e) => {
+    if (!aoaFusionIsPanning) {
+      // Update cursor when hovering over reset button
+      const rect = aoaFusionCanvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      if (mouseX >= rect.width - 100 && mouseX <= rect.width - 10 &&
+          mouseY >= 10 && mouseY <= 40) {
+        aoaFusionCanvas.style.cursor = "pointer";
+      } else {
+        aoaFusionCanvas.style.cursor = "grab";
+      }
+      return;
+    }
+    
+    aoaFusionPanX = e.clientX - aoaFusionPanStartX;
+    aoaFusionPanY = e.clientY - aoaFusionPanStartY;
+    
+    if (aoaFusionInterval) {
+      updateAoAFusion(); // Redraw
+    }
+  });
+  
+  aoaFusionCanvas.addEventListener("mouseup", () => {
+    aoaFusionIsPanning = false;
+    aoaFusionCanvas.style.cursor = "grab";
+  });
+  
+  aoaFusionCanvas.addEventListener("mouseleave", () => {
+    aoaFusionIsPanning = false;
+    aoaFusionCanvas.style.cursor = "crosshair";
+  });
+  
+  // Double-click to reset
+  aoaFusionCanvas.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    resetAoAFusionView();
+  });
+  
+  // Set initial cursor
+  aoaFusionCanvas.style.cursor = "grab";
 }
 
 /**
@@ -1897,6 +2092,8 @@ let aoaFusionInterval = null;
 
 function startAoAFusionUpdates() {
   if (aoaFusionInterval) return;
+  // Initialize zoom/pan handlers
+  initAoAFusionZoomPan();
   // Resize canvas on window resize (debounced)
   let resizeTimeout;
   window.addEventListener("resize", () => {

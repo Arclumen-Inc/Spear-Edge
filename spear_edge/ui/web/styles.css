@@ -864,9 +864,15 @@ input:focus, select:focus {
   background: #070a0f;
   border: 1px solid var(--bg-panel-border);
   border-radius: 8px;
-  cursor: crosshair;
+  cursor: grab;
   display: block;
   box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#aoaFusionCanvas:active {
+  cursor: grabbing;
 }
 
 .aoa-fusion-data {

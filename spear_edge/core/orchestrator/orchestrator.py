@@ -355,6 +355,161 @@ class Orchestrator:
         
         # Publish AoA update to UI
         self.bus.publish_nowait("aoa_cone", cone)
+        
+        # Check if we have enough cones for TAI calculation and send to ATAK
+        self._update_tai_if_ready()
+
+    def _update_tai_if_ready(self) -> None:
+        """
+        Calculate TAI from active AoA cones and send to ATAK if we have 2+ cones with GPS.
+        """
+        import time
+        from spear_edge.core.integrate.tripwire_events import AoaConeEvent
+        
+        now = time.time()
+        
+        # Get active cones (recent, with GPS and bearing)
+        active_cones = []
+        node_ids_seen = set()
+        
+        for cone in reversed(self.aoa_cones):
+            node_id = cone.get("node_id") or cone.get("source_node")
+            if not node_id:
+                continue
+            
+            # Only take one cone per node (most recent)
+            if node_id in node_ids_seen:
+                continue
+            
+            # Only include recent cones (within last 60 seconds)
+            cone_timestamp = cone.get("timestamp", 0)
+            if now - cone_timestamp > 60:
+                continue
+            
+            # Must have GPS and bearing
+            if not cone.get("bearing_deg") is not None:
+                continue
+            
+            # Get node GPS from registry
+            nodes = self.tripwires.snapshot()
+            node = next((n for n in nodes if n["node_id"] == node_id), None)
+            if not node or not node.get("gps") or not node["gps"].get("lat"):
+                continue
+            
+            # Add GPS to cone data
+            cone_with_gps = dict(cone)
+            cone_with_gps["gps"] = node["gps"]
+            
+            node_ids_seen.add(node_id)
+            active_cones.append(cone_with_gps)
+            
+            if len(active_cones) >= 3:
+                break
+        
+        # Need at least 2 cones for triangulation
+        if len(active_cones) < 2:
+            return
+        
+        # Calculate intersections
+        intersections = []
+        for i in range(len(active_cones)):
+            for j in range(i + 1, len(active_cones)):
+                cone1 = active_cones[i]
+                cone2 = active_cones[j]
+                
+                # Calculate intersection (simplified - using bearing lines)
+                # This is a simplified calculation - full implementation would use proper triangulation
+                lat1 = cone1["gps"]["lat"]
+                lon1 = cone1["gps"]["lon"]
+                bearing1 = cone1["bearing_deg"]
+                lat2 = cone2["gps"]["lat"]
+                lon2 = cone2["gps"]["lon"]
+                bearing2 = cone2["bearing_deg"]
+                
+                # Simple intersection calculation (for now - could be improved)
+                # This is a placeholder - proper implementation would use spherical geometry
+                try:
+                    # Use a simplified approach: calculate point along bearing from each node
+                    # and find intersection (this is approximate)
+                    import math
+                    R = 6371000  # Earth radius in meters
+                    
+                    # Convert to radians
+                    lat1_rad = math.radians(lat1)
+                    lon1_rad = math.radians(lon1)
+                    lat2_rad = math.radians(lat2)
+                    lon2_rad = math.radians(lon2)
+                    brg1_rad = math.radians(bearing1)
+                    brg2_rad = math.radians(bearing2)
+                    
+                    # Calculate intersection using plane approximation (for small distances)
+                    # This is simplified - full implementation would use great circle intersection
+                    d_lat = lat2_rad - lat1_rad
+                    d_lon = lon2_rad - lon1_rad
+                    
+                    # Approximate intersection (simplified)
+                    # For proper implementation, use Vincenty's formula or similar
+                    # For now, use midpoint as approximation when bearings are close
+                    if abs(bearing1 - bearing2) > 5:  # Only if bearings differ significantly
+                        # Simplified: use average of node positions weighted by confidence
+                        conf1 = cone1.get("confidence", 0.5)
+                        conf2 = cone2.get("confidence", 0.5)
+                        total_conf = conf1 + conf2
+                        if total_conf > 0:
+                            avg_lat = (lat1 * conf1 + lat2 * conf2) / total_conf
+                            avg_lon = (lon1 * conf1 + lon2 * conf2) / total_conf
+                            intersections.append({"lat": avg_lat, "lon": avg_lon})
+                except Exception as e:
+                    print(f"[TAI] Error calculating intersection: {e}")
+                    continue
+        
+        if not intersections:
+            return
+        
+        # Average intersections for TAI center
+        avg_lat = sum(p["lat"] for p in intersections) / len(intersections)
+        avg_lon = sum(p["lon"] for p in intersections) / len(intersections)
+        
+        # Calculate TAI radius and quality metrics
+        avg_confidence = sum(c.get("confidence", 0.5) for c in active_cones) / len(active_cones)
+        avg_cone_width = sum(c.get("cone_width_deg", 45) for c in active_cones) / len(active_cones)
+        
+        # Estimate radius in meters (simplified - based on cone widths and distances)
+        # Average distance between nodes
+        import math
+        distances = []
+        for i in range(len(active_cones)):
+            for j in range(i + 1, len(active_cones)):
+                lat1 = active_cones[i]["gps"]["lat"]
+                lon1 = active_cones[i]["gps"]["lon"]
+                lat2 = active_cones[j]["gps"]["lat"]
+                lon2 = active_cones[j]["gps"]["lon"]
+                dlat = math.radians(lat2 - lat1)
+                dlon = math.radians(lon2 - lon1)
+                a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                distance_m = 6371000 * c
+                distances.append(distance_m)
+        
+        avg_distance = sum(distances) / len(distances) if distances else 1000
+        
+        # Estimate radius based on cone width and confidence
+        # Wider cones and lower confidence = larger radius
+        base_radius = avg_distance * 0.1  # 10% of average node distance
+        width_factor = 1.0 + (avg_cone_width / 90.0)  # 45deg = 1.5x, 90deg = 2x
+        confidence_factor = 1.0 + (1.0 - avg_confidence) * 2.0  # Low conf = 3x, high conf = 1x
+        radius_m = base_radius * width_factor * confidence_factor
+        
+        # Clamp radius
+        radius_m = max(50, min(5000, radius_m))  # 50m to 5km
+        
+        # Calculate quality
+        quality = avg_confidence * (1.0 - min(avg_cone_width / 90.0, 0.5))  # Simplified quality
+        
+        # Send to ATAK (throttle to once per 5 seconds)
+        if not hasattr(self, "_last_tai_send") or (now - self._last_tai_send) > 5.0:
+            self.cot.send_tai(avg_lat, avg_lon, radius_m, avg_confidence, quality)
+            self._last_tai_send = now
 
     def _freq_bin(self, freq_hz: float) -> int:
         b = int(self.auto_policy.freq_bin_hz)

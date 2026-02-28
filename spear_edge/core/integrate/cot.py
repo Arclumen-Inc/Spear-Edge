@@ -248,6 +248,66 @@ class CoTBroadcaster:
   </detail>
 </event>"""
 
+    def build_tai_marker(
+        self,
+        lat: float,
+        lon: float,
+        radius_m: float,
+        confidence: float,
+        quality: float,
+        stale_s: int = 60,
+    ) -> str:
+        """
+        Build CoT marker for TAI (Targeted Area of Interest) from AoA fusion.
+        
+        Args:
+            lat: Latitude of TAI center
+            lon: Longitude of TAI center
+            radius_m: Uncertainty radius in meters
+            confidence: Average confidence (0-1)
+            quality: Fusion quality metric (0-1)
+            stale_s: Stale time in seconds
+        """
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        stale = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + stale_s))
+
+        # Use Edge GPS altitude if available, else 0
+        alt_ft = self._gps_cache.get("gps_alt_ft", 0.0)
+        alt_m = float(alt_ft or 0.0) * 0.3048
+
+        # Stable UID -> one marker that updates in place
+        uid = f"{self.uid}-tai"
+
+        # Calculate circular error (CE) and linear error (LE) from radius
+        # CE/LE represent uncertainty ellipse - use radius for both
+        ce = int(radius_m)
+        le = int(radius_m)
+
+        # Build remarks with TAI info
+        conf_pct = int(confidence * 100)
+        qual_pct = int(quality * 100)
+        remarks = f"TAI (Targeted Area of Interest) - Confidence: {conf_pct}%, Quality: {qual_pct}%, Radius: {int(radius_m)}m"
+
+        return f"""<event version="2.0"
+  uid="{uid}"
+  type="a-u-E-U"
+  how="m-p"
+  time="{now}"
+  start="{now}"
+  stale="{stale}">
+  <point lat="{lat}" lon="{lon}" hae="{alt_m}" ce="{ce}" le="{le}"/>
+  <detail>
+    <contact callsign="{_xml_escape(self.callsign)}"/>
+    <remarks>{_xml_escape(remarks)}</remarks>
+  </detail>
+</event>"""
+
+    def send_tai(self, lat: float, lon: float, radius_m: float, confidence: float, quality: float):
+        """Send TAI marker to ATAK via CoT multicast."""
+        xml = self.build_tai_marker(lat, lon, radius_m, confidence, quality)
+        self.send_event(xml)
+        print(f"[ATAK] TAI sent: {lat:.6f}, {lon:.6f}, radius={int(radius_m)}m, conf={confidence:.2f}")
+
     # ------------------------------------------------------------------
     # POSITION LOOP
     # ------------------------------------------------------------------
