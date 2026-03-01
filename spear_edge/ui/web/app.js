@@ -57,7 +57,9 @@ const freqInput         = document.getElementById("freqInput");       // MHz
 const rateInput         = document.getElementById("rateInput");       // MS/s
 const fftSizeSelect     = document.getElementById("fftSizeSelect");
 const gainModeSelect    = document.getElementById("gainModeSelect"); // manual|agc
-const gainSlider        = document.getElementById("gainSlider");      // dB
+const gainSlider        = document.getElementById("gainSlider");     // Main gain slider (0-60 dB)
+const gainValue         = document.getElementById("gainValue");      // Gain value display
+const bt200Select       = document.getElementById("bt200Select");     // BT200 external LNA enable
 const wfBrightnessSlider = document.getElementById("wfBrightnessSlider");
 const wfContrastSlider   = document.getElementById("wfContrastSlider");
 const wfBrightnessValue  = document.getElementById("wfBrightnessValue");
@@ -192,6 +194,22 @@ let activeTask          = null;
 
 let lastSpectrum        = null;
 let smoothedNoiseFloor  = null;
+
+// Calibration metadata (set from WebSocket hello message)
+let globalCalibrationOffset = 0.0;
+let globalPowerUnits = "dBFS";
+
+// Stable FFT autoscale state
+let fftFloorSmoothed = null;
+let fftDbMinSmoothed = null;
+
+// FFT autoscale tuning knobs (stable look)
+const FFT_VIEW_RANGE_DB = 55;     // Fixed vertical span (reduced for better contrast)
+const FFT_FLOOR_MARGIN_DB = 0;    // Noise floor sits at bottom of chart (0 = floor at bottom)
+const FFT_FLOOR_PCT = 0.02;       // Percentile for floor estimate (2nd percentile = true noise floor, not energy-chasing)
+const FFT_MAX_STEP_DB = 0.35;     // Max scale movement per frame (prevents jumping)
+const FFT_RISE_ALPHA = 0.18;      // Floor rises faster (attack)
+const FFT_FALL_ALPHA = 0.03;      // Floor falls slowly (release)
 
 // Waterfall display controls
 let wfBrightness = 0;  // Offset in dB (-50 to +50)
@@ -416,10 +434,7 @@ function unlockSdrControls() {
 }
 
 function updateGainUiLock() {
-  if (!gainSlider) return;
-  const locked = edgeMode === "tasked" || gainModeSelect?.value === "agc";
-  gainSlider.disabled = locked;
-  gainSlider.classList.toggle("locked", locked);
+  // Gain is controlled via slider - this function kept for compatibility
 }
 
 // ------------------------------
@@ -457,18 +472,21 @@ function clearWaterfall() {
 function readSdrForm() {
   const mhz = Number(freqInput?.value ?? 915.0);
   const msps = Number(rateInput?.value ?? 2.0);
-  const fftSize = Number(fftSizeSelect?.value ?? 1024);
+  const fftSize = Number(fftSizeSelect?.value ?? 4096);
   const bandwidthMhz = bandwidthInput?.value ? Number(bandwidthInput.value) : null;
   const fps = Number(fpsSelect?.value ?? 30);
+  const bt200Enabled = bt200Select?.value === "true";
+  const gainDb = gainSlider?.value ? Number(gainSlider.value) : 0.0;  // Read from slider (default 0)
   return {
     center_freq_hz: Math.round(mhz * 1e6),
     sample_rate_sps: Math.round(msps * 1e6),
-    fft_size: Number.isFinite(fftSize) ? fftSize : 1024,
+    fft_size: Number.isFinite(fftSize) ? fftSize : 4096,
     fps: Number.isFinite(fps) ? fps : 30.0,
     gain_mode: gainModeSelect?.value || "manual",
-    gain_db: Number(gainSlider?.value ?? 30),
+    gain_db: Number.isFinite(gainDb) ? gainDb : 0.0,  // Read from slider (default 0)
     rx_channel: 0,
     bandwidth_hz: bandwidthMhz ? Math.round(bandwidthMhz * 1e6) : null,
+    bt200_enabled: bt200Enabled,
   };
 }
 
@@ -476,14 +494,19 @@ async function applySdrConfig() {
   if (edgeMode === "tasked") return;
   const cfg = readSdrForm();
   try {
-    await API.sdrConfig({
+    const configPayload = {
       center_freq_hz: cfg.center_freq_hz,
       sample_rate_sps: cfg.sample_rate_sps,
       gain_mode: cfg.gain_mode,
       gain_db: cfg.gain_db,
       rx_channel: cfg.rx_channel,
       bandwidth_hz: cfg.bandwidth_hz,
-    });
+    };
+    // Add BT200 if configured
+    if (cfg.bt200_enabled !== undefined) {
+      configPayload.bt200_enabled = cfg.bt200_enabled;
+    }
+    await API.sdrConfig(configPayload);
   } catch (e) {
     console.warn("[SDR] config failed:", e);
   }
@@ -542,7 +565,7 @@ async function startManualCapture() {
 // ------------------------------
 // AXES + GRID DRAW
 // ------------------------------
-function drawPowerAxis(ctx, fftH, w, dbMin, dbMax) {
+function drawPowerAxis(ctx, fftH, w, dbMin, dbMax, unit = "dBFS") {
   ctx.save();
   ctx.fillStyle = "rgba(0,255,136,0.9)";
   ctx.font = "11px monospace";
@@ -552,7 +575,7 @@ function drawPowerAxis(ctx, fftH, w, dbMin, dbMax) {
     const t = i / ticks;
     const db = dbMin + t * (dbMax - dbMin);
     const y = fftH - t * fftH;
-    const label = db.toFixed(0) + " dBFS";
+    const label = db.toFixed(0) + " " + unit;
     const metrics = ctx.measureText(label);
     ctx.fillStyle = "rgba(0,0,0,0.6)";
     ctx.fillRect(2, y - 12, metrics.width + 8, 14);
@@ -633,9 +656,30 @@ function drawSpectrum(frame) {
   const fftH = Math.floor(h * FFT_HEIGHT_FRAC);
   const wfH = h - fftH;
 
-  // Pick sources: max-hold for FFT, instant for waterfall
-  const fftArr = frame.power_dbfs;  // max-hold (for FFT line)
+  // Use instantaneous for FFT line so bursts show up (ELRS, FHSS, etc.)
+  // Instant for waterfall as well
+  const fftArr = frame.power_inst_dbfs || frame.power_dbfs;
   const wfArr = frame.power_inst_dbfs || frame.power_dbfs;  // instant (for waterfall)
+  
+  // Diagnostic logging (throttled to every 2 seconds)
+  if (!window._lastFftDiag || (Date.now() - window._lastFftDiag) > 2000) {
+    const fftMin = Math.min(...fftArr.map(Number).filter(Number.isFinite));
+    const fftMax = Math.max(...fftArr.map(Number).filter(Number.isFinite));
+    const fftMean = fftArr.map(Number).filter(Number.isFinite).reduce((a, b) => a + b, 0) / fftArr.length;
+    const noiseFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : fftMin;
+    console.log(`[FFT UI] Range: ${fftMin.toFixed(1)} to ${fftMax.toFixed(1)} dBFS, mean: ${fftMean.toFixed(1)} dBFS, floor: ${noiseFloor.toFixed(1)} dBFS, dynamic_range: ${(fftMax - noiseFloor).toFixed(1)} dB`);
+    window._lastFftDiag = Date.now();
+  }
+
+  // Determine power units from frame metadata or global calibration FIRST
+  // Priority: frame metadata > global calibration > default (dBFS)
+  // This must be done BEFORE auto-scaling so we can adjust TARGET_FLOOR_DB appropriately
+  const calibrationOffset = frame.calibration_offset_db !== undefined ? 
+                            Number(frame.calibration_offset_db) : 
+                            globalCalibrationOffset;
+  const powerUnits = frame.power_units || 
+                     globalPowerUnits ||
+                     (Math.abs(calibrationOffset) > 0.1 ? "dBm" : "dBFS");
 
   // ================================
   // WATERFALL (DPR-CORRECT, STABLE)
@@ -658,24 +702,25 @@ function drawSpectrum(frame) {
     }
 
     // ---- Stable waterfall scaling (pre-WebGL behavior) ----
+    // Use 10th percentile for noise floor (more robust than median for waterfall)
+    const wfSorted = wfArr
+      .map(Number)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    const wfFloorIdx = Math.max(0, Math.floor(wfSorted.length * 0.10));
+    const wfNoiseFloor = wfSorted.length ? wfSorted[wfFloorIdx] : -75;
+    
     if (smoothedNoiseFloor == null) {
-      // Initialize from median-ish bin
-      const midIdx = Math.floor(wfArr.length * 0.5);
-      const mid = wfArr[midIdx];
-      smoothedNoiseFloor = Number.isFinite(mid) ? Number(mid) : -90;
+      smoothedNoiseFloor = wfNoiseFloor;
     } else {
-      // Slow drift only
-      const midIdx = Math.floor(wfArr.length * 0.5);
-      if (midIdx < wfArr.length) {
-        const mid = wfArr[midIdx];
-        if (Number.isFinite(mid)) {
-          smoothedNoiseFloor = 0.98 * smoothedNoiseFloor + 0.02 * Number(mid);
-        }
-      }
+      // Slow drift toward actual noise floor
+      smoothedNoiseFloor = 0.95 * smoothedNoiseFloor + 0.05 * wfNoiseFloor;
     }
 
-    const wfDbMin = smoothedNoiseFloor - 10;
-    const wfDbMax = smoothedNoiseFloor + 40;
+    // Waterfall range: noise floor - 15 dB to noise floor + 50 dB
+    // This gives good visibility of signals while showing noise floor context
+    const wfDbMin = smoothedNoiseFloor - 15;
+    const wfDbMax = smoothedNoiseFloor + 50;
     const wfRange = Math.max(1, wfDbMax - wfDbMin);
 
     // Draw ONE row (device space)
@@ -716,48 +761,51 @@ function drawSpectrum(frame) {
   }
 
   // ---------
-  // Visual leveling (stable / clamped) for FFT
-  // - Estimate noise floor from FFT trace ONLY
-  // - Use a low percentile so brief FHSS energy doesn't pull the floor
-  // - Clamp offset motion per frame to prevent hopping
+  // Stable FFT autoscale (fixed span, smooth floor tracking)
+  // - Fixed vertical span (70 dB) for stable look
+  // - Smoothly tracks noise floor with asymmetrical attack/release
+  // - Prevents jumping (max 0.35 dB per frame movement)
+  // - Makes weak signals visible by following true noise floor
   // ---------
-  const TARGET_FLOOR_DB = -80.0;
-  const DB_MIN = -120.0;
-  const floorSrc = fftArr;
-
-  // robust percentile (5%)
-  const sorted = floorSrc
+  
+  // Robust floor estimate (percentile)
+  const sortedF = fftArr
     .map(Number)
     .filter(Number.isFinite)
     .sort((a, b) => a - b);
+  const idx = Math.max(0, Math.floor(sortedF.length * FFT_FLOOR_PCT));
+  const floorNow = sortedF.length ? sortedF[idx] : -80;
 
-  const floorIdx = Math.max(0, Math.floor(sorted.length * 0.05));
-  const noiseFloorRaw = sorted.length ? sorted[floorIdx] : -90;
-
-  // desired offset to place floor at TARGET_FLOOR_DB
-  const desiredOffset = TARGET_FLOOR_DB - noiseFloorRaw;
-
-  if (window._fftVisOffset === undefined) {
-    window._fftVisOffset = desiredOffset;
+  // Smoothed floor with asymmetrical attack/release
+  // Rises faster (attack) when floor increases, falls slowly (release) when floor decreases
+  if (fftFloorSmoothed == null) {
+    fftFloorSmoothed = floorNow;
   } else {
-    // clamp movement (dB per rendered frame)
-    const delta = desiredOffset - window._fftVisOffset;
-    const MAX_STEP_DB = 0.25; // smaller = more stable
-    const step = Math.max(-MAX_STEP_DB, Math.min(MAX_STEP_DB, delta));
-    window._fftVisOffset += step;
+    const alpha = (floorNow > fftFloorSmoothed) ? FFT_RISE_ALPHA : FFT_FALL_ALPHA;
+    fftFloorSmoothed = (1 - alpha) * fftFloorSmoothed + alpha * floorNow;
   }
 
-  const visOffset = window._fftVisOffset || 0.0;
+  // Target dbMin so noise floor sits at the bottom of the chart
+  const dbMinTarget = fftFloorSmoothed - FFT_FLOOR_MARGIN_DB;
 
-  // Apply offset ONLY for FFT drawing
+  // Clamp movement per frame to prevent hopping
+  if (fftDbMinSmoothed == null) {
+    fftDbMinSmoothed = dbMinTarget;
+  }
+  const delta = dbMinTarget - fftDbMinSmoothed;
+  const step = Math.max(-FFT_MAX_STEP_DB, Math.min(FFT_MAX_STEP_DB, delta));
+  fftDbMinSmoothed += step;
+
+  // Fixed span (stable look) - 55 dB vertical range
+  const dbMin = fftDbMinSmoothed;
+  const dbMax = dbMin + FFT_VIEW_RANGE_DB;
+
+  // Apply calibration offset (display-only: Q11 dBFS -> SDR++-style if configured)
+  // Backend uses true Q11 scaling internally, offset is only for UI display
   const p = fftArr.map(v => {
-    const x = Number(v) + visOffset;
-    return Number.isFinite(x) ? x : DB_MIN;
+    const x = Number(v) + globalCalibrationOffset;
+    return Number.isFinite(x) ? x : dbMin;
   });
-
-  // Fixed display range for FFT
-  const dbMin = -90;
-  const dbMax = -20;
 
   // Clear ONLY the FFT area (never the waterfall) - device space
   ctx.save();
@@ -771,6 +819,7 @@ function drawSpectrum(frame) {
   ctx.textAlign = "left";
   if (Number.isFinite(frame.center_freq_hz)) {
     ctx.fillText("Center: " + (frame.center_freq_hz / 1e6).toFixed(3) + " MHz", 8, 14);
+    ctx.fillText("Units: " + powerUnits, 8, 28);
   }
 
   // Center marker
@@ -793,13 +842,49 @@ function drawSpectrum(frame) {
     }
   }
 
-  // Smoothing for FFT trace
+  // Stable FFT trace: fast attack, slow decay (keeps bursts visible)
+  // This is the "SDR UI feel" - spikes show up immediately, then fade slowly
   const dbNow = p.map(v => clamp(v, dbMin, dbMax));
-  if (!lastSpectrum || lastSpectrum.length !== dbNow.length) {
-    lastSpectrum = dbNow.slice();
+  
+  // Downsample for display if FFT size is very large (performance optimization)
+  // Keep max 4096 points for rendering (canvas width is typically much smaller anyway)
+  const MAX_DISPLAY_POINTS = 4096;
+  const downsample = dbNow.length > MAX_DISPLAY_POINTS;
+  const downsampleStep = downsample ? Math.ceil(dbNow.length / MAX_DISPLAY_POINTS) : 1;
+  const displayLength = downsample ? Math.floor(dbNow.length / downsampleStep) : dbNow.length;
+  
+  // Downsample the current frame for display (take max value in each bin to preserve peaks)
+  const dbNowDisplay = [];
+  if (downsample) {
+    for (let i = 0; i < displayLength; i++) {
+      const startIdx = i * downsampleStep;
+      const endIdx = Math.min(startIdx + downsampleStep, dbNow.length);
+      let maxVal = dbNow[startIdx];
+      for (let j = startIdx + 1; j < endIdx; j++) {
+        if (dbNow[j] > maxVal) maxVal = dbNow[j];
+      }
+      dbNowDisplay.push(maxVal);
+    }
   } else {
-    for (let i = 0; i < dbNow.length; i++) {
-      lastSpectrum[i] = FFT_SMOOTH_ALPHA * dbNow[i] + (1 - FFT_SMOOTH_ALPHA) * lastSpectrum[i];
+    dbNowDisplay.push(...dbNow);
+  }
+  
+  const ATTACK = 0.55;  // Rise speed (0..1) - higher = faster attack (spikes appear quickly)
+  const DECAY  = 0.96;  // Fall speed (0..1) - closer to 1 = slower decay (spikes fade slowly)
+  
+  if (!lastSpectrum || lastSpectrum.length !== displayLength) {
+    lastSpectrum = dbNowDisplay.slice();
+  } else {
+    for (let i = 0; i < displayLength; i++) {
+      const cur = lastSpectrum[i];
+      const nxt = dbNowDisplay[i];
+      if (nxt > cur) {
+        // Fast attack: when signal rises, follow it quickly
+        lastSpectrum[i] = ATTACK * nxt + (1 - ATTACK) * cur;
+      } else {
+        // Slow decay: when signal falls, fade slowly (keeps spikes visible)
+        lastSpectrum[i] = DECAY * cur + (1 - DECAY) * nxt;
+      }
     }
   }
 
@@ -819,7 +904,7 @@ function drawSpectrum(frame) {
   ctx.shadowBlur = 0;
 
   // Axes
-  drawPowerAxis(ctx, fftH, w, dbMin, dbMax);
+  drawPowerAxis(ctx, fftH, w, dbMin, dbMax, powerUnits);
   ctx.strokeStyle = "rgba(255,255,255,0.08)";
   ctx.beginPath();
   ctx.moveTo(0, fftH + 0.5);
@@ -875,6 +960,7 @@ function parseBinarySpectrumFrame(arrayBuffer) {
   const power1 = hasInst ? new Float32Array(arrayBuffer, off1, fftSize) : null;
 
   // drawSpectrum() expects normal JS arrays or array-likes; Float32Array works fine
+  // Note: Binary frames don't include calibration metadata, so use global values
   return {
     ts,
     center_freq_hz: centerFreqHz,
@@ -883,6 +969,9 @@ function parseBinarySpectrumFrame(arrayBuffer) {
     power_dbfs: power0,
     power_inst_dbfs: power1,
     noise_floor_dbfs: noiseFloor,
+    // Calibration metadata not in binary format - use global values set from hello message
+    calibration_offset_db: globalCalibrationOffset,
+    power_units: globalPowerUnits,
     // freqs_hz intentionally omitted (we'll compute axis from meta)
   };
 }
@@ -916,8 +1005,18 @@ function startFftWs() {
       if (typeof ev.data === "string") {
         const msg = JSON.parse(ev.data);
 
-        // optional: handle hello
+        // Handle hello message - store calibration metadata
         if (msg && msg.type === "hello") {
+          if (msg.calibration_offset_db !== undefined) {
+            globalCalibrationOffset = Number(msg.calibration_offset_db);
+          }
+          if (msg.power_units) {
+            globalPowerUnits = msg.power_units;
+          }
+          console.log("[FFT WS] Calibration:", {
+            offset: globalCalibrationOffset,
+            units: globalPowerUnits
+          });
           return;
         }
 
@@ -1091,6 +1190,12 @@ async function startLive() {
   console.log("[Live] SDR config:", cfg);
   
   try {
+    // CRITICAL: Apply SDR config FIRST (including gain, LNA, BT200)
+    // This ensures gain settings are applied before starting the scan
+    console.log("[Live] Applying SDR config (gain, LNA, BT200)...");
+    await applySdrConfig();
+    
+    // Then start the live scan with FFT parameters
     console.log("[Live] Calling API.liveStart with payload:", {
       center_freq_hz: cfg.center_freq_hz,
       sample_rate_sps: cfg.sample_rate_sps,
@@ -1169,6 +1274,27 @@ function updateSdrStatus(info) {
   if (sdrRateEl) sdrRateEl.textContent = cfg.sample_rate_sps ? (cfg.sample_rate_sps / 1e6).toFixed(2) + " MS/s" : "—";
   if (sdrGainEl) sdrGainEl.textContent = (cfg.gain_db !== undefined) ? (cfg.gain_db + " dB") : "—";
   if (sdrGainModeEl) sdrGainModeEl.textContent = cfg.gain_mode || "manual";
+  
+  // Update gain input from current_config
+  if (cfg.gain_db !== undefined && gainSlider) {
+    gainSlider.value = cfg.gain_db;
+    if (gainValue) {
+      gainValue.textContent = cfg.gain_db;
+    }
+  }
+  
+  // Update LNA and BT200 controls from current_config (what we want) not device (what hardware has)
+  // This prevents the UI from reverting user input before it's applied
+  // LNA gain is now automatically optimized by main gain - no manual control
+  // BT200: Only enable if user explicitly sets it to true
+  // Default is always "false" (disabled) - hardware not connected
+  if (cfg.bt200_enabled === true && bt200Select) {
+    // Only set to true if explicitly enabled
+    bt200Select.value = "true";
+  } else if (bt200Select) {
+    // Default to false (disabled) - BT200 not connected
+    bt200Select.value = "false";
+  }
 }
 
 async function refreshStatus() {
@@ -2465,6 +2591,20 @@ function init() {
   
   if (btnSetL4tbr0) btnSetL4tbr0.addEventListener("click", () => setNetworkInterface("l4tbr0"));
   if (btnSetEth0) btnSetEth0.addEventListener("click", () => setNetworkInterface("eth0"));
+  
+  // Gain slider
+  if (gainSlider) {
+    gainSlider.addEventListener("input", (e) => {
+      const value = parseInt(e.target.value);
+      if (gainValue) {
+        gainValue.textContent = value;
+      }
+      // Auto-apply gain change if scan is running
+      if (edgeMode !== "tasked") {
+        applySdrConfig();
+      }
+    });
+  }
   
   // Waterfall brightness/contrast controls
   if (wfBrightnessSlider) {

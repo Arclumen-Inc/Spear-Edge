@@ -5,6 +5,7 @@ import time
 import numpy as np
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
+from spear_edge.settings import settings
 
 MAGIC = b"SPRF"
 VERSION = 1
@@ -27,7 +28,15 @@ async def live_fft_ws(websocket: WebSocket, orchestrator):
     q = await orchestrator.bus.subscribe("live_spectrum", maxsize=2)  # already small
 
     # Tell client we'll send binary frames next (still readable/debuggable)
-    await websocket.send_text(json.dumps({"type": "hello", "proto": 1, "binary": True}))
+    # Calibration offset: 0.0 = true Q11 dBFS, -24.08 = SDR++-style 16-bit dBFS
+    # This is a display-only offset - backend uses true Q11 scaling internally
+    await websocket.send_text(json.dumps({
+        "type": "hello", 
+        "proto": 1, 
+        "binary": True,
+        "calibration_offset_db": settings.CALIBRATION_OFFSET_DB,
+        "power_units": "dBFS",
+    }))
 
     try:
         while True:

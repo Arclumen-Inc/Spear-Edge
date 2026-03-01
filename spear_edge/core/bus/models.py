@@ -10,10 +10,12 @@ class LiveSpectrumFrame:
     center_freq_hz: int
     sample_rate_sps: int
     fft_size: int
-    power_dbfs: List[float]  # max-hold (for FFT line)
-    power_inst_dbfs: Optional[List[float]] = None  # instant (for waterfall)
+    power_dbfs: List[float]  # max-hold (for FFT line) - field name kept for compatibility, but values may be calibrated to dBm
+    power_inst_dbfs: Optional[List[float]] = None  # instant (for waterfall) - field name kept for compatibility
     noise_floor_dbfs: Optional[float] = None
     freqs_hz: Optional[List[float]] = None  # Optional - client can compute from center_freq, sample_rate, fft_size
+    calibration_offset_db: Optional[float] = None  # Calibration offset applied (0.0 = no calibration, dBFS; non-zero = calibrated to dBm)
+    power_units: Optional[str] = None  # "dBm" or "dBFS" - indicates actual units of power values
     meta: Optional[Dict[str, Any]] = None
 
 @dataclass(frozen=True)

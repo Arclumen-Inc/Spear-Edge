@@ -38,9 +38,12 @@ class SdrConfigRequest(BaseModel):
     center_freq_hz: int
     sample_rate_sps: int
     gain_mode: GainMode = GainMode.MANUAL
-    gain_db: float = 30.0
+    gain_db: float = 0.0  # Default 0 dB - user can adjust via UI slider
     rx_channel: int = 0
     bandwidth_hz: int | None = None
+    # LNA gain is now automatically optimized by bladerf_set_gain() - no manual control
+    bt200_enabled: bool | None = None  # BT200 external LNA enabled
+    dual_channel: bool = False  # Dual RX mode
 
 
 # -------------------------------------------------
@@ -60,7 +63,7 @@ def bind(orchestrator) -> APIRouter:
             center_freq_hz=req.center_freq_hz,
             sample_rate_sps=req.sample_rate_sps,
             gain_mode=GainMode.MANUAL,
-            gain_db=30.0,
+                gain_db=0.0,  # Default 0 dB - user can adjust via UI slider
             rx_channel=0,
             bandwidth_hz=None,
         )
@@ -122,6 +125,9 @@ def bind(orchestrator) -> APIRouter:
             gain_db=req.gain_db,
             rx_channel=req.rx_channel,
             bandwidth_hz=req.bandwidth_hz,
+            # LNA gain is now automatically optimized by bladerf_set_gain() - no manual control needed
+            bt200_enabled=getattr(req, 'bt200_enabled', None),
+            dual_channel=getattr(req, 'dual_channel', False),
         )
 
     # -------------------------------------------------
@@ -260,8 +266,10 @@ def bind(orchestrator) -> APIRouter:
         if scan_running and not only_gain_changed:
             # Keep current FFT params if possible
             st = orchestrator.status()
-            fft_size = int(st.get("fft_size") or 1024)
-            fps = float(st.get("fps") or 10.0)
+            # Use current FFT size/FPS from status, or fallback to defaults
+            # Default to 4096 (new default) instead of 1024 (old USB overflow workaround)
+            fft_size = int(st.get("fft_size") or 4096)
+            fps = float(st.get("fps") or 15.0)
 
             await orchestrator.start_scan(
                 center_freq_hz=new_cfg.center_freq_hz,

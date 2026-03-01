@@ -203,7 +203,7 @@
 
           <label>
             Sample Rate (MS/s)
-            <input type="number" id="rateInput" value="2.0" step="0.1">
+            <input type="number" id="rateInput" value="2.0" step="0.01" min="0.1" max="61.44">
           </label>
 
           <label>
@@ -214,10 +214,11 @@
           <label>
             FFT Size
             <select id="fftSizeSelect">
-              <option value="512">512</option>
-              <option value="1024" selected>1024</option>
-              <option value="2048">2048</option>
-              <option value="4096">4096</option>
+              <option value="4096" selected>4096</option>
+              <option value="8192">8192</option>
+              <option value="16384">16384</option>
+              <option value="32768">32768</option>
+              <option value="65536">65536</option>
             </select>
           </label>
 
@@ -230,17 +231,32 @@
           </label>
 
           <label>
+            Gain (dB)
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <input type="range" id="gainSlider" min="0" max="60" value="0" step="1" style="flex: 1;">
+              <span id="gainValue" style="min-width: 40px; text-align: right; font-family: monospace;">0</span>
+            </div>
+            <small style="font-size: 10px; color: var(--text-muted);">Main gain: 0-60 dB (lab: 5-15, field: 20-35)</small>
+          </label>
+
+          <label>
             FPS
             <select id="fpsSelect">
-              <option value="15">15</option>
-              <option value="30" selected>30</option>
-              <option value="60">60</option>
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="15" selected>15</option>
+              <option value="20">20</option>
+              <option value="30">30</option>
             </select>
           </label>
 
           <label>
-            Gain (dB)
-            <input type="range" id="gainSlider" min="0" max="70" value="30">
+            BT200 External LNA
+            <select id="bt200Select">
+              <option value="false" selected>Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+            <small style="font-size: 10px; color: var(--text-muted);">Bias-tee powered external LNA</small>
           </label>
 
           <label>

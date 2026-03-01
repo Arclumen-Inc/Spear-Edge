@@ -175,13 +175,29 @@ class Orchestrator:
             await self.open()
 
             # Build + store SDR config (for /sdr/info)
+            # SANITY PROFILE (lab/near TX): Safe defaults to prevent overdriving
+            # - BT200: OFF (external LNA not connected, adds ~16-20 dB gain)
+            # - LNA: 0 dB (internal LNA gain off for headroom)
+            # - System gain: 10 dB (conservative starting point, can be increased if needed)
+            # 
+            # If samples mean > 0.15-0.20 or max > 0.8, reduce gain further
+            # Target: samples mean ~0.02-0.10, max < 0.8, noise floor -70 to -95 dBFS
+            prev_bt200 = getattr(self.sdr_config, 'bt200_enabled', None) if self.sdr_config else None
+            # Safety: Ensure BT200 is explicitly False (not None) if not previously configured
+            # BT200 should never be enabled by default (hardware not connected, adds too much gain)
+            bt200_default = False if prev_bt200 is None else prev_bt200
+            # LNA gain is now automatically optimized by bladerf_set_gain() - no manual control needed
+            
             self.sdr_config = SdrConfig(
                 center_freq_hz=center_freq_hz,
                 sample_rate_sps=sample_rate_sps,
                 gain_mode=self.sdr_config.gain_mode if self.sdr_config else GainMode.MANUAL,
-                gain_db=self.sdr_config.gain_db if self.sdr_config else 55.0,
+                gain_db=self.sdr_config.gain_db if self.sdr_config else 0.0,  # Default 0 dB - user can adjust via UI slider
                 rx_channel=self.sdr_config.rx_channel if self.sdr_config else 0,
                 bandwidth_hz=self.sdr_config.bandwidth_hz if self.sdr_config else None,
+                # LNA gain is now automatically optimized by bladerf_set_gain() - no manual control needed
+                bt200_enabled=bt200_default,  # Explicitly False by default (BT200 not connected)
+                dual_channel=getattr(self.sdr_config, 'dual_channel', False) if self.sdr_config else False,  # Single channel by default
             )
 
             # Apply SDR config atomically
@@ -195,6 +211,10 @@ class Orchestrator:
                 await self._scan.stop()
             if self._rx_task and self._rx_task.is_running():
                 await self._rx_task.stop()
+            
+            # Clear FFT params when stopping scan
+            self._current_fft_size = None
+            self._current_fps = None
 
             # RX drain path (line rate)
             ring_size = int(sample_rate_sps * 0.5)
@@ -216,13 +236,19 @@ class Orchestrator:
             await self._rx_task.start()
 
             # FFT task (FPS limited)
+            # No calibration offset - using raw bladeRF values
             self._scan = ScanTask(
                 ring=self._ring,
                 center_freq_hz=center_freq_hz,
                 sample_rate_sps=sample_rate_sps,
                 fft_size=fft_size,
                 fps=fps,
+                calibration_offset_db=0.0,  # No offset - raw bladeRF values
             )
+            
+            # Store FFT params for status() to retrieve
+            self._current_fft_size = fft_size
+            self._current_fps = fps
 
             def _on_frame(frame: Dict[str, Any]) -> None:
                 self._last_frame_ts = frame.get("ts", time.time())
@@ -236,6 +262,8 @@ class Orchestrator:
                         power_dbfs=frame["power_dbfs"],
                         power_inst_dbfs=frame.get("power_inst_dbfs"),
                         noise_floor_dbfs=frame.get("noise_floor_dbfs"),
+                        calibration_offset_db=frame.get("calibration_offset_db"),  # Calibration metadata
+                        power_units=frame.get("power_units"),  # "dBm" or "dBFS"
                     )
                     self.bus.publish_nowait("live_spectrum", evt)
                 except Exception:
@@ -265,8 +293,17 @@ class Orchestrator:
             
             # CRITICAL: Deactivate SDR stream to free hardware resources
             # This prevents stream from being in a bad state for captures
-            if hasattr(self.sdr, "rx_stream") and self.sdr.rx_stream is not None:
-                print("[ORCH] Deactivating SDR stream...")
+            # BladeRFNativeDevice uses _stream_active flag, SoapySDR uses rx_stream object
+            if hasattr(self.sdr, "_stream_active") and self.sdr._stream_active:
+                print("[ORCH] Deactivating SDR stream (BladeRFNativeDevice)...")
+                try:
+                    if hasattr(self.sdr, "_deactivate_stream"):
+                        self.sdr._deactivate_stream()
+                        print("[ORCH] SDR stream deactivated")
+                except Exception as e:
+                    print(f"[ORCH] Error deactivating stream: {e}")
+            elif hasattr(self.sdr, "rx_stream") and self.sdr.rx_stream is not None:
+                print("[ORCH] Deactivating SDR stream (SoapySDR)...")
                 try:
                     if hasattr(self.sdr, "dev") and self.sdr.dev is not None:
                         self.sdr.dev.deactivateStream(self.sdr.rx_stream)
@@ -636,6 +673,8 @@ class Orchestrator:
             "queue_depth": None,  # reserved for future job queue
             "task": self.task_info,
             "auto_policy": asdict(self.auto_policy),
+            "fft_size": getattr(self, "_current_fft_size", None),  # Current FFT size
+            "fps": getattr(self, "_current_fps", None),  # Current FPS
         }
     
     def get_sdr_health(self) -> Dict[str, Any]:

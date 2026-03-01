@@ -27,7 +27,7 @@ class RxTask:
         self.empty_reads = 0
         self.read_calls = 0
 
-        # reusable buffer for Soapy (if your driver supports it later)
+        # reusable buffer for future optimization (if driver supports it)
         self._reuse = None
 
     def is_running(self):

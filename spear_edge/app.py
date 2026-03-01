@@ -1,14 +1,23 @@
+import logging
+import os
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from spear_edge.settings import settings
 
+# Configure logging level - suppress INFO logs by default, show WARNING and above
+# Can be overridden with SPEAR_LOG_LEVEL env var (DEBUG, INFO, WARNING, ERROR)
+log_level = os.getenv("SPEAR_LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.WARNING),
+    format='%(levelname)s: %(message)s'
+)
+
 from spear_edge.core.orchestrator.orchestrator import Orchestrator
 from spear_edge.core.capture.capture_manager import CaptureManager
 
 from spear_edge.core.sdr.bladerf_native import BladeRFNativeDevice
-from spear_edge.core.sdr.mock import MockSDR
 
 from spear_edge.api.http.routes_health import router as health_router
 from spear_edge.api.http.routes_hub import router as hub_router
@@ -28,14 +37,14 @@ from spear_edge.api.ws.tripwire_link_ws import tripwire_link_ws
 from spear_edge.api.http.routes_capture import bind as bind_capture
 
 # ------------------------------------------------------------
-# SDR factory (auto-detect, safe fallback)
+# SDR factory (native libbladerf only)
 # ------------------------------------------------------------
 def make_sdr():
-    try:
-        return BladeRFNativeDevice()
-    except Exception as e:
-        print(f"[SDR] libbladerf init failed, falling back to MockSDR: {e}")
-        return MockSDR()
+    """
+    Initialize native libbladerf driver.
+    Raises exception if bladeRF hardware is not available.
+    """
+    return BladeRFNativeDevice()
 
 
 # ------------------------------------------------------------

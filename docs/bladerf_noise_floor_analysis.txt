@@ -1,0 +1,23 @@
+Results (averaged over 100 reads):
+======================================================================
+Raw Samples (int16):
+  Max:     2048.0 (range: 2048 - 2048)
+  Mean:    250.2
+  Std:     492.1
+  Rail fraction (>=2047): 1.205%
+
+Normalized Samples (Q11 scaling, 1/2048):
+  Mean magnitude: 0.2434
+  Max magnitude:  1.0000
+
+Q11 Format Analysis:
+  Expected range: [-2048, 2047]
+  Actual max seen: 2048
+  ⚠️  WARNING: Values exceed Q11 range!
+
+Noise Floor Estimate:
+  (Run with FFT analysis for dBFS estimate)
+======================================================================
+
+Closing device...
+[OK] Device closed

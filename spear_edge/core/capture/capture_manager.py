@@ -17,6 +17,7 @@ from spear_edge.core.capture.spectrogram import (
     save_spectrogram_thumbnail,
     extract_basic_stats,
 )
+from spear_edge.core.sdr.base import GainMode
 
 class CaptureManager:
     """
@@ -224,9 +225,17 @@ class CaptureManager:
                 
                 # Apply gain settings if provided (manual captures have this, armed captures use defaults)
                 if gain_mode and hasattr(self.orch.sdr, "set_gain_mode"):
-                    self.orch.sdr.set_gain_mode(gain_mode)
-                    source = "Tripwire event" if req.reason == "tripwire_armed" else "SDR controls"
-                    print(f"[CAPTURE] Set gain mode from {source}: {gain_mode}")
+                    # Convert string to GainMode enum if needed (gain_mode comes as string from API)
+                    try:
+                        if isinstance(gain_mode, str):
+                            gain_mode_enum = GainMode(gain_mode.lower())
+                        else:
+                            gain_mode_enum = gain_mode
+                        self.orch.sdr.set_gain_mode(gain_mode_enum)
+                        source = "Tripwire event" if req.reason == "tripwire_armed" else "SDR controls"
+                        print(f"[CAPTURE] Set gain mode from {source}: {gain_mode_enum.value}")
+                    except (ValueError, AttributeError) as e:
+                        print(f"[CAPTURE] WARNING: Invalid gain_mode '{gain_mode}', skipping: {e}")
                 if gain_db is not None and hasattr(self.orch.sdr, "set_gain"):
                     self.orch.sdr.set_gain(gain_db)
                     source = "Tripwire event" if req.reason == "tripwire_armed" else "SDR controls"
@@ -236,20 +245,48 @@ class CaptureManager:
                 
                 # CRITICAL: Verify stream is active and wait for it to be ready
                 print("[CAPTURE] Verifying SDR stream state...")
-                if not hasattr(self.orch.sdr, "rx_stream"):
-                    print("[CAPTURE] ERROR: SDR has no rx_stream attribute!")
-                    raise RuntimeError("SDR stream attribute missing")
                 
-                if self.orch.sdr.rx_stream is None:
-                    print("[CAPTURE] ERROR: SDR stream is None after tuning!")
+                # Check stream state - BladeRFNativeDevice uses _stream_active flag, not rx_stream object
+                stream_active = False
+                sdr_type = type(self.orch.sdr).__name__
+                
+                if hasattr(self.orch.sdr, "_stream_active"):
+                    stream_active = self.orch.sdr._stream_active
+                    print(f"[CAPTURE] SDR type: {sdr_type}, stream_active: {stream_active}")
+                elif hasattr(self.orch.sdr, "rx_stream"):
+                    # SoapySDR-based implementations use rx_stream object
+                    stream_active = self.orch.sdr.rx_stream is not None
+                    print(f"[CAPTURE] SDR type: {sdr_type}, rx_stream: {self.orch.sdr.rx_stream}")
+                else:
+                    # Fallback: assume stream is active if tune() completed successfully
+                    print(f"[CAPTURE] WARNING: SDR type {sdr_type} has no stream state attribute")
+                    print("[CAPTURE] Assuming stream is active after successful tune()")
+                    stream_active = True
+                
+                if not stream_active:
+                    print("[CAPTURE] ERROR: SDR stream is not active after tuning!")
                     print("[CAPTURE] Attempting to force stream setup...")
-                    # Force stream setup if it's None
+                    # Force stream setup if needed
                     if hasattr(self.orch.sdr, "_setup_stream"):
-                        self.orch.sdr._setup_stream()
-                    if self.orch.sdr.rx_stream is None:
+                        try:
+                            self.orch.sdr._setup_stream()
+                            print("[CAPTURE] Stream setup called, re-checking state...")
+                            # Re-check after setup
+                            if hasattr(self.orch.sdr, "_stream_active"):
+                                stream_active = self.orch.sdr._stream_active
+                                print(f"[CAPTURE] After setup: stream_active = {stream_active}")
+                            elif hasattr(self.orch.sdr, "rx_stream"):
+                                stream_active = self.orch.sdr.rx_stream is not None
+                                print(f"[CAPTURE] After setup: rx_stream = {self.orch.sdr.rx_stream}")
+                        except Exception as e:
+                            print(f"[CAPTURE] ERROR during stream setup: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    
+                    if not stream_active:
                         raise RuntimeError("SDR stream not initialized after force setup")
                 
-                print(f"[CAPTURE] SDR stream is active: {self.orch.sdr.rx_stream}")
+                print(f"[CAPTURE] SDR stream verified as active (type: {sdr_type})")
                 
                 # Wait for stream to be ready (bladeRF needs time after activation)
                 print("[CAPTURE] Waiting for stream to be ready...")
