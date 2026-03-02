@@ -40,8 +40,20 @@ Thumbs.db
 # Project specific
 data/artifacts/
 data/dataset_raw/
+data/dataset/
+data/rfuav/
+data/rfuav_test/
 *.log
 *.pid
+
+# ML models (large binary files)
+*.pth
+*.onnx
+*.h5
+*.pb
+
+# Cursor IDE
+.cursor/
 
 # Environment variables
 .env

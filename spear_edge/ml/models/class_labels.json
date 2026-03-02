@@ -1,0 +1,232 @@
+{
+  "version": "1.0",
+  "description": "SPEAR-Edge hierarchical classification labels - device and protocol identification",
+  "num_classes": 23,
+  "signal_types": {
+    "fhss_control": {
+      "name": "FHSS Control Signals",
+      "description": "Frequency-hopping spread spectrum control links",
+      "classes": ["elrs", "crossfire", "frsky", "flysky", "ghost", "redpine"]
+    },
+    "digital_video": {
+      "name": "Digital Video Links",
+      "description": "Digital video transmission systems",
+      "classes": ["dji_mini_4_pro", "dji_avata", "dji_fpv", "dji_mini_3", "dji_air_3", "dji_mavic_3", "walksnail", "hdzero", "dji_o3", "dji_o4"]
+    },
+    "analog_video": {
+      "name": "Analog FPV Video",
+      "description": "Analog first-person view video systems",
+      "classes": ["analog_fpv"]
+    },
+    "control_protocol": {
+      "name": "Control Protocols",
+      "description": "Control and telemetry protocols",
+      "classes": ["mavlink", "mavlink2", "lora_telemetry"]
+    },
+    "voice_ptt": {
+      "name": "Voice/PTT",
+      "description": "Voice and push-to-talk systems",
+      "classes": ["voice_analog", "voice_digital"]
+    }
+  },
+  "class_mapping": {
+    "0": {
+      "id": "elrs",
+      "name": "ExpressLRS",
+      "signal_type": "fhss_control",
+      "description": "ExpressLRS control link"
+    },
+    "1": {
+      "id": "crossfire",
+      "name": "TBS Crossfire",
+      "signal_type": "fhss_control",
+      "description": "Team BlackSheep Crossfire control link"
+    },
+    "2": {
+      "id": "frsky",
+      "name": "FrSky",
+      "signal_type": "fhss_control",
+      "description": "FrSky control link"
+    },
+    "3": {
+      "id": "flysky",
+      "name": "FlySky",
+      "signal_type": "fhss_control",
+      "description": "FlySky control link"
+    },
+    "4": {
+      "id": "ghost",
+      "name": "Ghost",
+      "signal_type": "fhss_control",
+      "description": "Ghost control link"
+    },
+    "5": {
+      "id": "redpine",
+      "name": "Redpine",
+      "signal_type": "fhss_control",
+      "description": "Redpine control link"
+    },
+    "6": {
+      "id": "dji_mini_4_pro",
+      "name": "DJI Mini 4 Pro",
+      "signal_type": "digital_video",
+      "description": "DJI Mini 4 Pro drone"
+    },
+    "7": {
+      "id": "dji_avata",
+      "name": "DJI Avata",
+      "signal_type": "digital_video",
+      "description": "DJI Avata FPV drone"
+    },
+    "8": {
+      "id": "dji_fpv",
+      "name": "DJI FPV",
+      "signal_type": "digital_video",
+      "description": "DJI FPV drone"
+    },
+    "9": {
+      "id": "dji_mini_3",
+      "name": "DJI Mini 3",
+      "signal_type": "digital_video",
+      "description": "DJI Mini 3 drone"
+    },
+    "10": {
+      "id": "dji_air_3",
+      "name": "DJI Air 3",
+      "signal_type": "digital_video",
+      "description": "DJI Air 3 drone"
+    },
+    "11": {
+      "id": "dji_mavic_3",
+      "name": "DJI Mavic 3",
+      "signal_type": "digital_video",
+      "description": "DJI Mavic 3 drone"
+    },
+    "12": {
+      "id": "walksnail",
+      "name": "Walksnail",
+      "signal_type": "digital_video",
+      "description": "Walksnail digital FPV system"
+    },
+    "13": {
+      "id": "hdzero",
+      "name": "HDZero",
+      "signal_type": "digital_video",
+      "description": "HDZero digital FPV system"
+    },
+    "14": {
+      "id": "dji_o3",
+      "name": "DJI O3",
+      "signal_type": "digital_video",
+      "description": "DJI O3 Air Unit"
+    },
+    "15": {
+      "id": "dji_o4",
+      "name": "DJI O4",
+      "signal_type": "digital_video",
+      "description": "DJI O4 Air Unit"
+    },
+    "16": {
+      "id": "analog_fpv",
+      "name": "Analog FPV",
+      "signal_type": "analog_video",
+      "description": "Generic analog FPV video"
+    },
+    "17": {
+      "id": "mavlink",
+      "name": "MAVLink",
+      "signal_type": "control_protocol",
+      "description": "MAVLink control/telemetry protocol"
+    },
+    "18": {
+      "id": "mavlink2",
+      "name": "MAVLink 2.0",
+      "signal_type": "control_protocol",
+      "description": "MAVLink 2.0 control/telemetry protocol"
+    },
+    "19": {
+      "id": "lora_telemetry",
+      "name": "LoRa Telemetry",
+      "signal_type": "control_protocol",
+      "description": "LoRa-based telemetry link"
+    },
+    "20": {
+      "id": "voice_analog",
+      "name": "Analog Voice",
+      "signal_type": "voice_ptt",
+      "description": "Analog voice/PTT"
+    },
+    "21": {
+      "id": "voice_digital",
+      "name": "Digital Voice",
+      "signal_type": "voice_ptt",
+      "description": "Digital voice/PTT"
+    },
+    "22": {
+      "id": "unknown",
+      "name": "Unknown Signal",
+      "signal_type": "unknown",
+      "description": "Unknown or unclassified signal"
+    }
+  },
+  "rfuav_mapping": {
+    "AVATA": "dji_avata",
+    "MINI4": "dji_mini_4_pro",
+    "MINI3": "dji_mini_3",
+    "AIR3": "dji_air_3",
+    "MAVIC3": "dji_mavic_3",
+    "FPV": "dji_fpv",
+    "O3": "dji_o3",
+    "O4": "dji_o4"
+  },
+  "class_to_index": {
+    "elrs": 0,
+    "crossfire": 1,
+    "frsky": 2,
+    "flysky": 3,
+    "ghost": 4,
+    "redpine": 5,
+    "dji_mini_4_pro": 6,
+    "dji_avata": 7,
+    "dji_fpv": 8,
+    "dji_mini_3": 9,
+    "dji_air_3": 10,
+    "dji_mavic_3": 11,
+    "walksnail": 12,
+    "hdzero": 13,
+    "dji_o3": 14,
+    "dji_o4": 15,
+    "analog_fpv": 16,
+    "mavlink": 17,
+    "mavlink2": 18,
+    "lora_telemetry": 19,
+    "voice_analog": 20,
+    "voice_digital": 21,
+    "unknown": 22
+  },
+  "index_to_class": {
+    "0": "elrs",
+    "1": "crossfire",
+    "2": "frsky",
+    "3": "flysky",
+    "4": "ghost",
+    "5": "redpine",
+    "6": "dji_mini_4_pro",
+    "7": "dji_avata",
+    "8": "dji_fpv",
+    "9": "dji_mini_3",
+    "10": "dji_air_3",
+    "11": "dji_mavic_3",
+    "12": "walksnail",
+    "13": "hdzero",
+    "14": "dji_o3",
+    "15": "dji_o4",
+    "16": "analog_fpv",
+    "17": "mavlink",
+    "18": "mavlink2",
+    "19": "lora_telemetry",
+    "20": "voice_analog",
+    "21": "voice_digital",
+    "22": "unknown"
+  }
+}

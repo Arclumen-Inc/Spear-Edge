@@ -56,23 +56,45 @@ class CaptureManager:
         self.state: str = "idle"  # idle | capturing | error
         
         # Classifier for ML-based classification
-        # Try ONNX first, then orchestrator's classifier, then stub
+        # Try PyTorch GPU first, then ONNX, then orchestrator's classifier, then stub
         self.classifier = None
         
-        # Try ONNX classifier first
+        # Try PyTorch classifier first (GPU-accelerated)
         try:
-            from spear_edge.ml.infer_onnx import ONNXRfClassifier
-            model_path = Path("spear_edge/ml/models/spear_dummy.onnx")
+            from spear_edge.ml.infer_pytorch import PyTorchRfClassifier
+            # Try trained model first, then fallback to dummy
+            model_path = Path("spear_edge/ml/models/rf_classifier.pth")
+            if not model_path.exists():
+                model_path = Path("spear_edge/ml/models/rf_classifier_dummy.pth")
             if model_path.exists():
-                self.classifier = ONNXRfClassifier(str(model_path))
-                print("[CaptureManager] Loaded ONNX classifier")
+                self.classifier = PyTorchRfClassifier(str(model_path))
+                print(f"[CaptureManager] Loaded PyTorch GPU classifier from {model_path}")
             else:
-                print(f"[CaptureManager] ONNX model not found: {model_path}")
+                # Try creating a new model if no saved model exists
+                print(f"[CaptureManager] PyTorch model not found, creating new model")
+                self.classifier = PyTorchRfClassifier(num_classes=23)  # Use 23 classes from training
+                print("[CaptureManager] Created new PyTorch model")
         except ImportError as e:
-            print(f"[CaptureManager] ONNX Runtime not available: {e}")
-            print("[CaptureManager] Install with: pip3 install onnxruntime")
+            print(f"[CaptureManager] PyTorch not available: {e}")
         except Exception as e:
-            print(f"[CaptureManager] Failed to load ONNX classifier: {e}")
+            print(f"[CaptureManager] Failed to load PyTorch classifier: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Fallback to ONNX classifier
+        if self.classifier is None:
+            try:
+                from spear_edge.ml.infer_onnx import ONNXRfClassifier
+                model_path = Path("spear_edge/ml/models/spear_dummy.onnx")
+                if model_path.exists():
+                    self.classifier = ONNXRfClassifier(str(model_path))
+                    print("[CaptureManager] Loaded ONNX classifier")
+                else:
+                    print(f"[CaptureManager] ONNX model not found: {model_path}")
+            except ImportError as e:
+                print(f"[CaptureManager] ONNX Runtime not available: {e}")
+            except Exception as e:
+                print(f"[CaptureManager] Failed to load ONNX classifier: {e}")
         
         # Fallback to orchestrator's classifier if available
         if self.classifier is None:
