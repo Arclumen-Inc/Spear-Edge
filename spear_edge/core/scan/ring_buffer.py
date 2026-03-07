@@ -24,6 +24,7 @@ class IQRingBuffer:
         self._pop_lock_hold_times = []   # Time holding lock in pop()
 
     def push(self, samples: np.ndarray) -> None:
+        # Convert to complex64 outside lock to reduce lock hold time
         samples = np.asarray(samples, dtype=np.complex64)
         n = samples.size
 
@@ -39,19 +40,27 @@ class IQRingBuffer:
             
             lock_hold_start = time.perf_counter_ns()
             if n >= self.capacity:
+                # For large samples, only copy the last capacity samples
+                # Use faster view-based copy when possible
                 self.buffer[:] = samples[-self.capacity :]
                 self.write_idx = 0
                 self.read_idx = 0
                 self.size = self.capacity
+                lock_hold_time = (time.perf_counter_ns() - lock_hold_start) / 1_000_000
+                if lock_hold_time > 0.1:
+                    self._push_lock_hold_times.append(lock_hold_time)
                 return
 
             end = (self.write_idx + n) % self.capacity
 
+            # Optimize memory copy: minimize lock hold time
             if end < self.write_idx:
+                # Wraparound case: split copy
                 split = self.capacity - self.write_idx
                 self.buffer[self.write_idx :] = samples[:split]
                 self.buffer[:end] = samples[split:]
             else:
+                # Simple case: single contiguous copy
                 self.buffer[self.write_idx : end] = samples
 
             self.write_idx = end
@@ -76,15 +85,23 @@ class IQRingBuffer:
             lock_hold_start = time.perf_counter_ns()
             
             if self.size < n:
+                lock_hold_time = (time.perf_counter_ns() - lock_hold_start) / 1_000_000
+                if lock_hold_time > 0.1:
+                    self._pop_lock_hold_times.append(lock_hold_time)
                 return np.empty(0, dtype=np.complex64)
 
             end = (self.read_idx + n) % self.capacity
 
+            # Optimize: use view when possible, only copy when necessary
             if end < self.read_idx:
-                out = np.concatenate(
-                    (self.buffer[self.read_idx :], self.buffer[:end])
-                )
+                # Wraparound case: need to concatenate
+                # Pre-allocate output array to avoid concatenate overhead
+                out = np.empty(n, dtype=np.complex64)
+                split = self.capacity - self.read_idx
+                out[:split] = self.buffer[self.read_idx :]
+                out[split:] = self.buffer[:end]
             else:
+                # Simple case: contiguous read, use copy for safety
                 out = self.buffer[self.read_idx : end].copy()
 
             self.read_idx = end

@@ -690,15 +690,82 @@ input[type="range"]:focus::-moz-range-thumb {
 }
 
 .capture-row {
-  font-family: monospace;
-  font-size: 12px;
-  padding: 6px 8px;
   border-bottom: 1px solid rgba(255,255,255,0.06);
-  cursor: pointer;
 }
 
 .capture-row:hover {
   background: rgba(0,255,136,0.06);
+}
+
+.capture-row-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.capture-info {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.capture-label-section {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.capture-label-display {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  background: rgba(60, 255, 158, 0.1);
+  border-radius: 3px;
+  min-width: 60px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.capture-label-display.manual-label {
+  background: rgba(60, 255, 158, 0.2);
+  color: var(--accent-green);
+  font-weight: 500;
+}
+
+.capture-label-select {
+  background: #0a0f16;
+  border: 1px solid var(--bg-panel-border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text-main);
+  font-size: 10px;
+  font-family: monospace;
+  cursor: pointer;
+  min-width: 80px;
+  max-width: 100px;
+  appearance: none;
+  background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%20viewBox%3D%220%200%20292.4%20292.4%22%3E%3Cpath%20fill%3D%22%233cff9e%22%20d%3D%22M287%2C197.9L159.3%2C69.2c-3.7-3.7-9.7-3.7-13.4%2C0L5.4%2C197.9c-3.7%2C3.7-3.7%2C9.7%2C0%2C13.4l13.4%2C13.4c3.7%2C3.7%2C9.7%2C3.7%2C13.4%2C0l110.7-110.7l110.7%2C110.7c3.7%2C3.7%2C9.7%2C3.7%2C13.4%2C0l13.4-13.4C290.7%2C207.6%2C290.7%2C201.6%2C287%2C197.9z%22%2F%3E%3C%2Fsvg%3E');
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  background-size: 8px;
+  padding-right: 20px;
+}
+
+.capture-label-select:hover {
+  border-color: var(--accent-green);
+}
+
+.capture-label-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Apply Button */

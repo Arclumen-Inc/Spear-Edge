@@ -217,16 +217,26 @@ class Orchestrator:
             self._current_fps = None
 
             # RX drain path (line rate)
-            ring_size = int(sample_rate_sps * 0.5)
+            # Reduce ring buffer size for high rates to save memory
+            # 0.3 seconds for rates > 20 MS/s, 0.5 seconds otherwise
+            ring_duration = 0.3 if sample_rate_sps > 20_000_000 else 0.5
+            ring_size = int(sample_rate_sps * ring_duration)
             self._ring = IQRingBuffer(ring_size)
 
-            # Aim for ~10–25 ms of samples per read (good tradeoff)
-            # chunk = sample_rate * 0.02  (20 ms)
-            chunk = int(sample_rate_sps * 0.02)
+            # Aim for ~10–20 ms of samples per read (optimized for high rates)
+            # For high sample rates (>20 MS/s), use larger chunks to reduce overhead
+            if sample_rate_sps > 20_000_000:
+                chunk_duration_ms = 0.015  # 15ms for high rates
+            else:
+                chunk_duration_ms = 0.02  # 20ms for normal rates
+            
+            chunk = int(sample_rate_sps * chunk_duration_ms)
 
-            # clamp to reasonable range
+            # Adaptive clamping: higher max for high sample rates
             chunk = max(chunk, 32768)
-            chunk = min(chunk, 262144)
+            # For rates > 20 MS/s, allow up to 1M samples (supports 30-40 MS/s)
+            max_chunk = 1048576 if sample_rate_sps > 20_000_000 else 262144
+            chunk = min(chunk, max_chunk)
 
             self._rx_task = RxTask(
                 sdr=self.sdr,
@@ -236,14 +246,15 @@ class Orchestrator:
             await self._rx_task.start()
 
             # FFT task (FPS limited)
-            # No calibration offset - using raw bladeRF values
+            # Use calibration offset from settings (defaults to 0.0 for raw bladeRF values)
+            from spear_edge.settings import settings
             self._scan = ScanTask(
                 ring=self._ring,
                 center_freq_hz=center_freq_hz,
                 sample_rate_sps=sample_rate_sps,
                 fft_size=fft_size,
                 fps=fps,
-                calibration_offset_db=0.0,  # No offset - raw bladeRF values
+                calibration_offset_db=settings.CALIBRATION_OFFSET_DB,
             )
             
             # Store FFT params for status() to retrieve
@@ -637,12 +648,9 @@ class Orchestrator:
         if self.capture_mgr.queue_full():
             return False, "queue_full"
 
-        # 8. De-duplicate (same node + freq) - placeholder
-        # TODO: Implement recent_tripwire_hit if needed
-        # node = payload.get("node_id")
-        # freq = payload.get("freq_hz")
-        # if self.recent_tripwire_hit(node, freq, window_s=10):
-        #     return False, "duplicate"
+        # 8. De-duplicate (same node + freq)
+        # Note: Per-freqbin cooldown (above) already provides deduplication
+        # Additional per-node+freq deduplication can be added here if needed
 
         return True, "ok"
 
@@ -722,7 +730,51 @@ class Orchestrator:
     # Captures Meta Data
     # -------------------------------------------------
     def list_captures(self, limit: int = 50):
-        return self.capture_log[-limit:]
+        """Return captures with classification and directory info."""
+        from pathlib import Path
+        import json
+        from datetime import datetime
+        
+        results = []
+        for entry in self.capture_log[-limit:]:
+            # Try to find capture directory and classification
+            capture_dir = None
+            classification = None
+            
+            # Derive directory name from timestamp and frequency
+            ts = entry.get("ts", 0)
+            freq_hz = entry.get("freq_hz", 0)
+            if ts and freq_hz:
+                # Format: YYYYMMDD_HHMMSS_{freq}Hz_{sample_rate}sps_{reason}
+                try:
+                    dt = datetime.fromtimestamp(ts)
+                    dir_pattern = f"{dt.strftime('%Y%m%d_%H%M%S')}_{int(freq_hz)}Hz"
+                    
+                    # Search for matching directory
+                    captures_dir = Path("data/artifacts/captures")
+                    if captures_dir.exists():
+                        for cap_dir in captures_dir.iterdir():
+                            if cap_dir.is_dir() and dir_pattern in cap_dir.name:
+                                capture_dir = cap_dir.name
+                                # Try to read classification
+                                json_path = cap_dir / "capture.json"
+                                if json_path.exists():
+                                    try:
+                                        with open(json_path, 'r') as f:
+                                            data = json.load(f)
+                                        classification = data.get("classification", {})
+                                    except:
+                                        pass
+                                break
+                except Exception:
+                    pass
+            
+            result = entry.copy()
+            result["capture_dir"] = capture_dir
+            result["classification"] = classification
+            results.append(result)
+        
+        return results
 
     def _log_capture_result(self, res) -> None:
         """

@@ -1,5 +1,7 @@
 # Option A Implementation: True SC16_Q11 End-to-End
 
+> **Note:** This document describes the historical implementation. The current codebase uses `settings.CALIBRATION_OFFSET_DB` and `settings.IQ_SCALING_MODE` for configuration. See `spear_edge/settings.py` for current configuration options.
+
 ## Overview
 This document describes the implementation of Option A: treating bladeRF output as true SC16_Q11 end-to-end, while allowing the UI to optionally present "SDR++-style" numbers via a simple display offset.
 
@@ -49,15 +51,23 @@ This document describes the implementation of Option A: treating bladeRF output 
 ### Changes Made
 
 **File:** `spear_edge/api/ws/live_fft_ws.py`
-- Updated WebSocket hello message to use `settings.CALIBRATION_OFFSET_DB`
+- ✅ Updated WebSocket hello message to use `settings.CALIBRATION_OFFSET_DB`
 - Supports both modes:
   - `0.0` = True Q11 dBFS (0 dBFS = Q11 full-scale ±2048)
   - `-24.08` = SDR++-style 16-bit dBFS (matches SDR++ expectations)
 
 **File:** `spear_edge/settings.py`
-- Updated documentation to explain Option A approach
+- ✅ Updated documentation to explain Option A approach
 - `CALIBRATION_OFFSET_DB` defaults to `0.0` (true Q11)
 - Can be set via env var: `SPEAR_CALIBRATION_OFFSET_DB=-24.08` for SDR++-style
+
+**File:** `spear_edge/core/orchestrator/orchestrator.py`
+- ✅ Now uses `settings.CALIBRATION_OFFSET_DB` when creating ScanTask (line 247)
+- ✅ Calibration offset is properly passed through to FFT processing
+
+**File:** `spear_edge/core/scan/scan_task.py`
+- ✅ Uses calibration offset from parameter (now sourced from settings)
+- ✅ Sends calibration offset in frame metadata (line 319)
 
 **File:** `spear_edge/ui/web/app.js`
 - UI now applies `globalCalibrationOffset` to FFT array values

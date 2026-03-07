@@ -71,13 +71,19 @@ class ScanTask:
         self._fft_smoothed = None  # Smoothed FFT for display
         self._snr_smoothed = None  # Smoothed SNR value
         
-        # No calibration offset - display raw dBFS values from bladeRF
-        # The bladeRF hardware should work correctly without mathematical adjustments
-        self._calibration_offset_db = 0.0
+        # Calibration offset (from settings or parameter)
+        # 0.0 = raw dBFS values from bladeRF
+        # Non-zero = calibrated to dBm (e.g., -24.08 for SDR++-style calibration)
+        self._calibration_offset_db = float(calibration_offset_db)
 
         # Latest truth frame queue (optional consumer pattern; used by UI view task later)
         # "Latest wins": we overwrite if full.
         self.latest: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=1)
+        
+        # Pre-allocate work arrays to reduce allocations in hot path
+        self._work_iq = np.empty(self.fft_size, dtype=np.complex64)
+        self._work_windowed = np.empty(self.fft_size, dtype=np.complex64)
+        self._work_fft = np.empty(self.fft_size, dtype=np.complex128)  # FFT output is complex128
 
     def subscribe(self, cb: Callable[[Dict[str, Any]], Any]) -> None:
         """Register a callback to receive truth FFT frames."""
@@ -157,16 +163,26 @@ class ScanTask:
                 continue
 
             # Ensure complex64 for consistent FFT performance/memory
-            if iq.dtype != np.complex64:
-                iq = iq.astype(np.complex64, copy=False)
+            # Use pre-allocated work array to avoid allocation
+            if iq.dtype != np.complex64 or iq.size != self.fft_size:
+                if iq.size >= self.fft_size:
+                    self._work_iq[:] = iq[:self.fft_size]
+                else:
+                    # Pad with zeros if needed (shouldn't happen in normal operation)
+                    self._work_iq[:iq.size] = iq
+                    self._work_iq[iq.size:] = 0
+            else:
+                self._work_iq[:] = iq
 
             # Remove DC offset before FFT (removes LO leakage and DC bias)
-            # This prevents DC from raising the noise floor and making the FFT look "flat"
-            iq = iq - np.mean(iq)
+            # Use in-place operation to avoid allocation
+            dc_offset = np.mean(self._work_iq)
+            self._work_iq -= dc_offset
 
-            # Window and FFT
-            x = iq * self._win
-            X = np.fft.fftshift(np.fft.fft(x, n=self.fft_size))
+            # Window and FFT - use pre-allocated arrays
+            # Multiply in-place where possible
+            np.multiply(self._work_iq, self._win, out=self._work_windowed)
+            X = np.fft.fftshift(np.fft.fft(self._work_windowed, n=self.fft_size))
 
             # Coherent gain normalization (matches SDR++ behavior)
             # Divides by sum(window) instead of N to account for window energy loss
@@ -233,7 +249,12 @@ class ScanTask:
                 power_inst[-edge_zero_count:] = edge_zero_value
             
             # Diagnostic: Check sample levels and peak power
-            if frame_count % 150 == 0:  # Every 150 frames (~10 seconds at 15 fps)
+            # Reduced frequency for production (every 500 frames ~33 seconds at 15 fps)
+            # Can be enabled more frequently with SPEAR_DEBUG_FFT=1 env var
+            import os
+            debug_fft = os.getenv("SPEAR_DEBUG_FFT", "0") == "1"
+            log_interval = 150 if debug_fft else 500
+            if frame_count % log_interval == 0:
                 sample_mag_max = float(np.max(np.abs(iq)))
                 sample_mag_mean = float(np.mean(np.abs(iq)))
                 sample_mag_std = float(np.std(np.abs(iq)))
@@ -316,7 +337,7 @@ class ScanTask:
                 "noise_floor_dbfs": noise_floor_db,
                 "snr_db": float(self._snr_smoothed),  # Smoothed SNR (SDR++ SNR smoothing=20)
                 # No calibration - using raw bladeRF values
-                "calibration_offset_db": 0.0,
+                "calibration_offset_db": self._calibration_offset_db,
                 "power_units": "dBFS",
             }
 

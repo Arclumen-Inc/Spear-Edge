@@ -80,8 +80,6 @@ const btnManual         = document.getElementById("btnManual");
 const btnArmed          = document.getElementById("btnArmed");
 
 // Spectrum display controls
-const peakHoldCheckbox  = document.getElementById("peakHoldCheckbox");
-const averageCheckbox   = document.getElementById("averageCheckbox");
 const traceModeSelect   = document.getElementById("traceModeSelect");
 const waterfallPaletteSelect = document.getElementById("waterfallPaletteSelect");
 const timeMarkersCheckbox = document.getElementById("timeMarkersCheckbox");
@@ -204,8 +202,6 @@ let smoothedNoiseFloor  = null;
 
 // Trace mode state
 let traceMode = "instant";  // instant, peak, average, min
-let peakHoldEnabled = false;
-let averageEnabled = false;
 let peakHoldSpectrum = null;  // Peak hold trace
 let averageSpectrum = null;   // Average trace
 let minHoldSpectrum = null;   // Min hold trace
@@ -1113,7 +1109,7 @@ function drawSpectrum(frame) {
   }
   
   // Handle different trace modes
-  if (traceMode === "peak" || peakHoldEnabled) {
+  if (traceMode === "peak") {
     // Peak Hold mode: track maximum values with slow decay
     if (!peakHoldSpectrum || peakHoldSpectrum.length !== displayLength) {
       peakHoldSpectrum = dbNowDisplay.slice();
@@ -1128,7 +1124,7 @@ function drawSpectrum(frame) {
       }
     }
     lastSpectrum = peakHoldSpectrum.slice();
-  } else if (traceMode === "average" || averageEnabled) {
+  } else if (traceMode === "average") {
     // Average mode: exponential moving average
     if (!averageSpectrum || averageSpectrum.length !== displayLength) {
       averageSpectrum = dbNowDisplay.slice();
@@ -2652,16 +2648,115 @@ function renderCaptureLog(log) {
     captureLogEl.appendChild(empty);
     return;
   }
+  
+  // Get class labels for dropdown
+  const classLabels = [
+    "elrs", "crossfire", "frsky", "flysky", "ghost", "redpine",
+    "dji_mini_4_pro", "dji_avata", "dji_fpv", "dji_mini_3", "dji_air_3",
+    "dji_mavic_3", "walksnail", "hdzero", "dji_o3", "dji_o4",
+    "analog_fpv", "mavlink", "mavlink2", "lora_telemetry",
+    "voice_analog", "voice_digital", "unknown"
+  ];
+  
   for (const item of log.slice().reverse()) {
     const row = document.createElement("div");
     row.className = "capture-row";
+    
     const freqMHz = (Number(item.freq_hz || 0) / 1e6).toFixed(3);
     const durMs = Math.round(Number(item.duration_s || 0) * 1000);
     const when = new Date(Number(item.ts || 0) * 1000).toLocaleTimeString();
-    row.textContent =
-      `[${when}] ${freqMHz} MHz · ${durMs} ms · ${item.reason || "capture"}` +
+    
+    // Get current classification
+    const currentLabel = item.classification?.label || "unknown";
+    const currentConf = item.classification?.confidence || 0;
+    const isManualLabel = item.classification?.model === "manual_label";
+    
+    // Create row content container
+    const rowContent = document.createElement("div");
+    rowContent.className = "capture-row-content";
+    
+    // Create info section
+    const info = document.createElement("div");
+    info.className = "capture-info";
+    info.textContent = `[${when}] ${freqMHz} MHz · ${durMs} ms · ${item.reason || "capture"}` +
       (item.source_node ? ` · ${item.source_node}` : "") +
       (item.scan_plan ? ` · ${item.scan_plan}` : "");
+    
+    // Create label section
+    const labelSection = document.createElement("div");
+    labelSection.className = "capture-label-section";
+    
+    // Current label display (compact)
+    const labelDisplay = document.createElement("span");
+    labelDisplay.className = "capture-label-display";
+    labelDisplay.textContent = currentLabel;
+    if (isManualLabel) {
+      labelDisplay.classList.add("manual-label");
+    } else if (currentConf < 1.0 && currentConf > 0) {
+      labelDisplay.textContent += ` (${(currentConf * 100).toFixed(0)}%)`;
+    }
+    
+    // Label dropdown (compact)
+    const labelSelect = document.createElement("select");
+    labelSelect.className = "capture-label-select";
+    labelSelect.value = currentLabel;
+    labelSelect.title = "Change classification label";
+    
+    // Add options
+    classLabels.forEach(label => {
+      const option = document.createElement("option");
+      option.value = label;
+      option.textContent = label;
+      labelSelect.appendChild(option);
+    });
+    
+    // Handle label change
+    labelSelect.addEventListener("change", async (e) => {
+      const newLabel = e.target.value;
+      if (!item.capture_dir) {
+        alert("Cannot label: capture directory not found");
+        labelSelect.value = currentLabel; // Revert
+        return;
+      }
+      
+      // Disable select while updating
+      labelSelect.disabled = true;
+      const originalValue = currentLabel;
+      
+      try {
+        const response = await fetch("/api/capture/label", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            capture_dir: item.capture_dir,
+            label: newLabel
+          })
+        });
+        
+        const result = await response.json();
+        if (result.ok) {
+          labelDisplay.textContent = newLabel;
+          labelDisplay.classList.add("manual-label");
+          // Refresh capture list to show updated label
+          setTimeout(() => pollCaptures(), 500);
+        } else {
+          alert(`Failed to update label: ${result.error}`);
+          labelSelect.value = originalValue; // Revert
+        }
+      } catch (err) {
+        alert(`Error updating label: ${err.message}`);
+        labelSelect.value = originalValue; // Revert
+      } finally {
+        labelSelect.disabled = false;
+      }
+    });
+    
+    labelSection.appendChild(labelDisplay);
+    labelSection.appendChild(labelSelect);
+    
+    rowContent.appendChild(info);
+    rowContent.appendChild(labelSection);
+    row.appendChild(rowContent);
     captureLogEl.appendChild(row);
   }
 }
@@ -2935,46 +3030,9 @@ function init() {
   }
   
   // Spectrum display controls
-  if (peakHoldCheckbox) {
-    peakHoldCheckbox.addEventListener("change", (e) => {
-      peakHoldEnabled = e.target.checked;
-      if (peakHoldEnabled && !peakHoldSpectrum) {
-        peakHoldSpectrum = null;  // Will be initialized on next frame
-      }
-      // Update trace mode select if needed
-      if (peakHoldEnabled && traceModeSelect) {
-        traceModeSelect.value = "peak";
-        traceMode = "peak";
-      }
-    });
-  }
-  
-  if (averageCheckbox) {
-    averageCheckbox.addEventListener("change", (e) => {
-      averageEnabled = e.target.checked;
-      if (averageEnabled && !averageSpectrum) {
-        averageSpectrum = null;  // Will be initialized on next frame
-      }
-      // Update trace mode select if needed
-      if (averageEnabled && traceModeSelect) {
-        traceModeSelect.value = "average";
-        traceMode = "average";
-      }
-    });
-  }
-  
   if (traceModeSelect) {
     traceModeSelect.addEventListener("change", (e) => {
       traceMode = e.target.value;
-      // Update checkboxes to match
-      if (peakHoldCheckbox) {
-        peakHoldCheckbox.checked = (traceMode === "peak");
-        peakHoldEnabled = (traceMode === "peak");
-      }
-      if (averageCheckbox) {
-        averageCheckbox.checked = (traceMode === "average");
-        averageEnabled = (traceMode === "average");
-      }
       // Clear trace buffers when switching modes
       if (traceMode !== "peak") peakHoldSpectrum = null;
       if (traceMode !== "average") averageSpectrum = null;

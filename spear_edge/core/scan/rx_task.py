@@ -70,15 +70,17 @@ class RxTask:
         - push immediately into ring
         - never block on other subsystems
         """
-        # Choose a sane chunk:
-        # - big enough to reduce call rate
-        # - not so big that latency becomes awful
+        # Use the chunk size provided by orchestrator (already optimized)
         chunk = max(16384, self.chunk_size)
 
-        # If user sets very high SR, increase chunk automatically
-        # Example: 30 MS/s => chunk should be 131072 or more
-        # You can tune this later; it's safe.
-        if getattr(self.sdr, "sample_rate_sps", 0) >= 10_000_000:
+        # For very high sample rates, ensure minimum chunk size
+        # Orchestrator already handles adaptive sizing, but ensure minimum here
+        sample_rate = getattr(self.sdr, "sample_rate_sps", 0)
+        if sample_rate >= 20_000_000:
+            # For 30-40 MS/s, minimum 262144 samples (8.7ms at 30 MS/s)
+            chunk = max(chunk, 262144)
+        elif sample_rate >= 10_000_000:
+            # For 10-20 MS/s, minimum 131072 samples
             chunk = max(chunk, 131072)
 
         while not self._stop_event.is_set():

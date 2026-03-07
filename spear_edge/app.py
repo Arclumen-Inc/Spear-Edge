@@ -14,6 +14,15 @@ logging.basicConfig(
     format='%(levelname)s: %(message)s'
 )
 
+# Suppress uvicorn access logs (HTTP request logs) - they're too verbose
+# Only show WARNING and above for uvicorn access logger
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.setLevel(logging.WARNING)
+
+# Also suppress uvicorn general INFO logs
+uvicorn_logger = logging.getLogger("uvicorn")
+uvicorn_logger.setLevel(logging.WARNING)
+
 from spear_edge.core.orchestrator.orchestrator import Orchestrator
 
 from spear_edge.core.sdr.bladerf_native import BladeRFNativeDevice
@@ -103,10 +112,6 @@ def create_app() -> FastAPI:
     async def ws_notify(websocket: WebSocket):
         await events_ws(websocket, orchestrator)
 
-    @app.websocket("/ws/tripwire")
-    async def ws_tripwire(websocket: WebSocket):
-        await tripwire_link_ws(websocket, app.state.orchestrator)
-    
     @app.websocket("/ws/tripwire_link")
     async def ws_tripwire_link(websocket: WebSocket):
         await tripwire_link_ws(websocket, app.state.orchestrator)

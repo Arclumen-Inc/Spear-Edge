@@ -726,91 +726,6 @@ class CaptureManager:
         print(f"[CAPTURE] IQ capture to disk complete: {total_captured} samples")
         return total_captured
 
-    async def _capture_iq(self, sample_rate: int, duration_s: float) -> np.ndarray:
-        n = int(sample_rate * duration_s)
-        if n <= 0:
-            raise ValueError("Invalid capture length")
-
-        # Aggressive chunk sizing based on sample rate (reduces syscall/GIL pressure)
-        # At high rates, larger chunks are critical for reliable capture
-        if sample_rate >= 20_000_000:
-            # 30 MS/s: use 262144 or larger
-            chunk = 262144
-        elif sample_rate >= 10_000_000:
-            # 10 MS/s: use 65536 or 131072
-            chunk = 131072
-        elif sample_rate >= 5_000_000:
-            # 5 MS/s: use 32768
-            chunk = 32768
-        else:
-            # Lower rates: use 16384
-            chunk = 16384
-        
-        # Ensure power-of-two (bladeRF requirement)
-        chunk = 1 << (chunk.bit_length() - 1) if chunk > 0 else 16384
-        
-        out = np.empty(n, dtype=np.complex64)
-        i = 0
-        
-        # Timeout budget to prevent infinite loops
-        t0 = time.time()
-        max_wait_s = max(2.0, duration_s * 2.0)
-
-        print(f"[CAPTURE] Starting IQ capture of {n} samples ({duration_s}s @ {sample_rate/1e6:.3f} MS/s)")
-        print(f"[CAPTURE] Using chunk size: {chunk} samples (rate-adaptive)")
-
-        while i < n:
-            # Check timeout budget
-            if (time.time() - t0) > max_wait_s:
-                print(f"[CAPTURE] ERROR: timeout budget exceeded ({max_wait_s:.1f}s), aborting capture (got {i}/{n} samples)")
-                break
-
-            # Always request constant chunk size (power-of-two)
-            raw = await asyncio.to_thread(self.orch.sdr.read_samples, chunk)
-
-            if raw is None or raw.size == 0:
-                # Timeout: cooperative yield only (no wall-time sleep)
-                await asyncio.sleep(0)
-                continue
-
-            # Convert real → complex if needed
-            if raw.dtype.kind != "c":
-                samples = np.empty(raw.size, dtype=np.complex64)
-                samples.real = raw
-                samples.imag = 0.0
-            else:
-                samples = raw.astype(np.complex64, copy=False)
-
-            # Copy what we got (slice to exact remaining length if needed)
-            take = min(samples.size, n - i)
-            out[i:i + take] = samples[:take]
-            i += take
-
-            # Progress update every ~0.2s (smoother progress bar)
-            progress_interval = max(sample_rate // 5, chunk * 2)  # At least 2 chunks
-            if i % progress_interval < take or i == n:
-                progress_pct = (i / n) * 100.0
-                if i % (sample_rate // 2) == 0:  # Log less frequently
-                    print(f"[CAPTURE] Progress: {i}/{n} samples ({progress_pct:.1f}%)")
-                # Publish progress event
-                self.orch.bus.publish_nowait("capture_progress", {
-                    "samples_captured": i,
-                    "samples_total": n,
-                    "progress_pct": progress_pct,
-                    "ts": time.time(),
-                })
-
-            # Cooperative yield only (no wall-time sleep at high sample rates)
-            await asyncio.sleep(0)
-
-        # Trim if short
-        if i < n:
-            print(f"[CAPTURE] Capture ended early — got {i} samples")
-            out = out[:i]
-
-        print(f"[CAPTURE] IQ capture complete: {out.size} samples")
-        return out
-
     # --------------------------------------------------
     # Stats + artifact writing
     # --------------------------------------------------
@@ -947,49 +862,6 @@ class CaptureManager:
             "psd": psd,
             "stats": stats,
         }
-
-    def _write_operator_spectrogram(self, iq: np.ndarray, fs: int, req: CaptureRequest, out_path: str) -> None:
-        """
-        Generate operator-view spectrogram PNG with annotations.
-        Falls back to PGM if PNG generation fails.
-        """
-        nfft = 1024
-        hop = 256
-        win = np.hanning(nfft).astype(np.float32)
-        n = iq.size
-        if n < nfft:
-            raise ValueError("Not enough samples for spectrogram")
-        
-        frames = 1 + (n - nfft) // hop
-        S = np.empty((frames, nfft // 2), dtype=np.float32)
-        for k in range(frames):
-            s = k * hop
-            x = iq[s:s + nfft] * win
-            X = np.fft.rfft(x)
-            P = (np.abs(X) ** 2).astype(np.float32)
-            SdB = 10.0 * np.log10(P + 1e-12)
-            S[k, :] = SdB[: nfft // 2]
-        
-        # Contrast stretch
-        lo = np.percentile(S, 5)
-        hi = np.percentile(S, 99)
-        img = np.clip((S - lo) / max(1e-6, hi - lo), 0.0, 1.0)
-        img = (img * 255.0).astype(np.uint8)
-        h, w = img.shape
-        
-        # Try to use PIL/Pillow for PNG, fallback to PGM
-        try:
-            from PIL import Image
-            pil_img = Image.fromarray(img, mode='L')
-            # Add annotations as text (simple approach)
-            # For now, just save the image - annotations can be added later with PIL drawing
-            pil_img.save(out_path, "PNG")
-        except ImportError:
-            # Fallback to PGM if PIL not available
-            print("[CAPTURE] PIL not available, using PGM format")
-            with open(out_path.replace('.png', '.pgm'), "wb") as f:
-                f.write(f"P5\n{w} {h}\n255\n".encode("ascii"))
-                f.write(img.tobytes())
 
     def _generate_vita49(self, req: CaptureRequest, iq: np.ndarray, out_path: str) -> None:
         """
@@ -1690,28 +1562,3 @@ class CaptureManager:
         }
         
         json_path.write_text(json.dumps(capture_json, indent=2))
-
-    def _write_spectrogram_pgm(self, iq: np.ndarray, fs: int, out_path: str) -> None:
-        nfft = 1024
-        hop = 256
-        win = np.hanning(nfft).astype(np.float32)
-        n = iq.size
-        if n < nfft:
-            raise ValueError("Not enough samples for spectrogram")
-        frames = 1 + (n - nfft) // hop
-        S = np.empty((frames, nfft // 2), dtype=np.float32)
-        for k in range(frames):
-            s = k * hop
-            x = iq[s:s + nfft] * win
-            X = np.fft.rfft(x)
-            P = (np.abs(X) ** 2).astype(np.float32)
-            SdB = 10.0 * np.log10(P + 1e-12)
-            S[k, :] = SdB[: nfft // 2]
-        lo = np.percentile(S, 5)
-        hi = np.percentile(S, 99)
-        img = np.clip((S - lo) / max(1e-6, hi - lo), 0.0, 1.0)
-        img = (img * 255.0).astype(np.uint8)
-        h, w = img.shape
-        with open(out_path, "wb") as f:
-            f.write(f"P5\n{w} {h}\n255\n".encode("ascii"))
-            f.write(img.tobytes())

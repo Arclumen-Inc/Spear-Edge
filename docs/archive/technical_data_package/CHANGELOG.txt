@@ -1,5 +1,8 @@
 SPEAR-Edge Changelog
 ====================
+> **Note:** This is a duplicate of `docs/CHANGELOG.txt`. The source of truth is `docs/CHANGELOG.txt`.
+> This file is kept for reference but may not be updated.
+
 Starting from: WebGL Rollback (2024-12-XX)
 
 All changes from this point forward will be documented here.

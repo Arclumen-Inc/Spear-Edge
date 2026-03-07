@@ -678,14 +678,30 @@ class BladeRFNativeDevice(SDRBase):
             self._deactivate_stream()
 
         # Choose channel layout
-        channel_layout = BLADERF_RX_X2 if dual_channel else BLADERF_RX_X1
-
-        # Configure sync streaming
-        # Buffer configuration (matching Edge's power-of-two requirement)
-        num_buffers = 64  # Standard bladeRF buffer count
-        buffer_size = 131072  # Power-of-two, matches Edge's high-rate chunk size
-        num_transfers = 16
-        stream_timeout_ms = 5000  # 5 second timeout
+        channel_layout = BLADERF_RX_X2 if dual_channel else BLADERF_RX_X1        # Configure sync streaming with adaptive buffer sizing for high sample rates
+        # Buffer configuration optimized for performance at 30-40 MS/s
+        sample_rate = getattr(self, 'sample_rate_sps', 2_400_000)
+        
+        # Adaptive buffer sizing based on sample rate
+        # For high rates (>20 MS/s), use larger buffers to reduce USB overhead
+        if sample_rate > 20_000_000:
+            # High rate: 8-16ms of data per buffer
+            # 30 MS/s * 0.01s = 300k samples, round to 524288 (power-of-two)
+            buffer_size = 524288  # 512KB buffer for high rates
+            num_buffers = 128  # More buffers for high-rate streaming
+            num_transfers = 32  # More concurrent transfers
+        elif sample_rate > 10_000_000:
+            # Medium rate: 4-8ms of data per buffer
+            buffer_size = 262144  # 256KB buffer
+            num_buffers = 96
+            num_transfers = 24
+        else:
+            # Low rate: standard configuration
+            buffer_size = 131072  # 128KB buffer
+            num_buffers = 64
+            num_transfers = 16
+        
+        stream_timeout_ms = 5000  # 5 second timeout (for stream config, not reads)
 
         ret = _libbladerf.bladerf_sync_config(
             self.dev,
@@ -776,11 +792,13 @@ class BladeRFNativeDevice(SDRBase):
             n = 1 << (n - 1).bit_length()
             logger.debug(f"Rounded read size to power-of-two: {n}")
 
-        # Pre-allocate conversion buffers if needed (reuse for performance)
-        if (self._conv_buf_iq is None or len(self._conv_buf_iq) != n):
-            self._conv_buf_i = np.empty(n, dtype=np.float32)
-            self._conv_buf_q = np.empty(n, dtype=np.float32)
-            self._conv_buf_iq = np.empty(n, dtype=np.complex64)
+        # Pre-allocate conversion buffers for maximum expected size (1M samples for 30-40 MS/s)
+        # This avoids reallocation when chunk sizes change, improving performance
+        max_expected_size = 1048576  # 1M samples (supports up to 40 MS/s with 25ms chunks)
+        if self._conv_buf_iq is None or len(self._conv_buf_iq) < max_expected_size:
+            self._conv_buf_i = np.empty(max_expected_size, dtype=np.float32)
+            self._conv_buf_q = np.empty(max_expected_size, dtype=np.float32)
+            self._conv_buf_iq = np.empty(max_expected_size, dtype=np.complex64)
 
         # Allocate CS16 buffer
         # For dual channel: 2 channels * 2 (I/Q) * n samples
@@ -793,7 +811,12 @@ class BladeRFNativeDevice(SDRBase):
         self._health_stats["total_reads"] += 1
 
         # Read from bladeRF (blocking call)
-        timeout_ms = 250  # 250ms timeout (increased from 100ms for production workloads)
+        # Adaptive timeout based on sample rate and chunk size
+        # Timeout should be ~2-3x expected read time to fail fast if USB is struggling
+        sample_rate = getattr(self, 'sample_rate_sps', 2_400_000)
+        expected_read_time_ms = (n / sample_rate) * 1000  # Expected time in ms
+        # Use 3x expected time, but clamp to reasonable range
+        timeout_ms = max(50, min(200, int(expected_read_time_ms * 3)))
         ret = _libbladerf.bladerf_sync_rx(
             self.dev,
             buf,
