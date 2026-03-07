@@ -45,7 +45,7 @@ const aoaFusionCtx      = aoaFusionCanvas ? aoaFusionCanvas.getContext("2d") : n
 const aoaStatusEl       = document.getElementById("aoaStatus");
 const aoaConesListEl    = document.getElementById("aoaConesList");
 const aoaFusionResultEl = document.getElementById("aoaFusionResult");
-const mlClassificationsEl = document.getElementById("mlClassificationsList");
+let mlClassificationsEl = null; // Will be initialized in init()
 const captureBanner     = document.getElementById("captureBanner");
 const captureProgressBar = document.getElementById("captureProgressBar");
 const wsLed             = document.getElementById("wsLed");
@@ -78,6 +78,13 @@ const sdrGainModeEl     = document.getElementById("sdr-gain-mode");
 // edgeModeLabel removed - mode shown in modePill instead
 const btnManual         = document.getElementById("btnManual");
 const btnArmed          = document.getElementById("btnArmed");
+
+// Spectrum display controls
+const peakHoldCheckbox  = document.getElementById("peakHoldCheckbox");
+const averageCheckbox   = document.getElementById("averageCheckbox");
+const traceModeSelect   = document.getElementById("traceModeSelect");
+const waterfallPaletteSelect = document.getElementById("waterfallPaletteSelect");
+const timeMarkersCheckbox = document.getElementById("timeMarkersCheckbox");
 
 
 // ------------------------------
@@ -195,17 +202,28 @@ let activeTask          = null;
 let lastSpectrum        = null;
 let smoothedNoiseFloor  = null;
 
-// Calibration metadata (set from WebSocket hello message)
-let globalCalibrationOffset = 0.0;
-let globalPowerUnits = "dBFS";
+// Trace mode state
+let traceMode = "instant";  // instant, peak, average, min
+let peakHoldEnabled = false;
+let averageEnabled = false;
+let peakHoldSpectrum = null;  // Peak hold trace
+let averageSpectrum = null;   // Average trace
+let minHoldSpectrum = null;   // Min hold trace
+let averageAlpha = 0.3;       // Averaging factor
+
+// Waterfall state
+let waterfallPalette = "spear";  // spear, rainbow, grayscale, hot, cool
+let timeMarkersEnabled = false;
+let waterfallTimestamps = [];     // Track timestamps for time markers
 
 // Stable FFT autoscale state
 let fftFloorSmoothed = null;
 let fftDbMinSmoothed = null;
 
 // FFT autoscale tuning knobs (stable look)
-const FFT_VIEW_RANGE_DB = 55;     // Fixed vertical span (reduced for better contrast)
-const FFT_FLOOR_MARGIN_DB = 0;    // Noise floor sits at bottom of chart (0 = floor at bottom)
+const FFT_VIEW_RANGE_DB = 70;     // Fixed vertical span (70 dB range for better signal visibility)
+const FFT_REFERENCE_LEVEL_DBFS = -20;  // Fixed reference level at top of display (absolute dBFS)
+const FFT_FLOOR_MARGIN_DB = 0;    // Noise floor margin from bottom (0 = floor at bottom of range)
 const FFT_FLOOR_PCT = 0.02;       // Percentile for floor estimate (2nd percentile = true noise floor, not energy-chasing)
 const FFT_MAX_STEP_DB = 0.35;     // Max scale movement per frame (prevents jumping)
 const FFT_RISE_ALPHA = 0.18;      // Floor rises faster (attack)
@@ -464,6 +482,12 @@ function clearWaterfall() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   smoothedNoiseFloor = null;
   lastSpectrum = null;
+  // Clear trace buffers
+  peakHoldSpectrum = null;
+  averageSpectrum = null;
+  minHoldSpectrum = null;
+  waterfallTimestamps = [];
+  window._waterfallStartTime = null;  // Reset waterfall start time
 }
 
 // ------------------------------
@@ -566,6 +590,8 @@ async function startManualCapture() {
 // AXES + GRID DRAW
 // ------------------------------
 function drawPowerAxis(ctx, fftH, w, dbMin, dbMax, unit = "dBFS") {
+  // Draw Y-axis with absolute dBFS values (not relative to noise floor)
+  // dbMin and dbMax are absolute dBFS values from the display range
   ctx.save();
   ctx.fillStyle = "rgba(0,255,136,0.9)";
   ctx.font = "11px monospace";
@@ -575,6 +601,7 @@ function drawPowerAxis(ctx, fftH, w, dbMin, dbMax, unit = "dBFS") {
     const t = i / ticks;
     const db = dbMin + t * (dbMax - dbMin);
     const y = fftH - t * fftH;
+    // Label shows absolute dBFS value (e.g., -20, -40, -60, -80, -100 dBFS)
     const label = db.toFixed(0) + " " + unit;
     const metrics = ctx.measureText(label);
     ctx.fillStyle = "rgba(0,0,0,0.6)";
@@ -612,6 +639,82 @@ function drawFreqAxis(ctx, fftH, w, meta) {
     ctx.fillText(mhz.toFixed(3) + " MHz", x, fftH - 6);
   }
   ctx.restore();
+}
+
+// ------------------------------
+// COLOR PALETTE FUNCTIONS
+// ------------------------------
+function getPaletteColor(t, palette) {
+  // Clamp t to [0, 1]
+  t = Math.max(0, Math.min(1, t));
+  
+  switch (palette) {
+    case "spear":
+      // SPEAR Green (current default)
+      return {
+        r: Math.floor(30 * t),
+        g: Math.floor(255 * t),
+        b: Math.floor(10 * t)
+      };
+    
+    case "rainbow":
+      // Rainbow: blue -> cyan -> green -> yellow -> red
+      const hue = 240 * (1 - t);  // 240 (blue) to 0 (red)
+      return hslToRgb(hue / 360, 1.0, 0.5);
+    
+    case "grayscale":
+      // Grayscale: black to white
+      const gray = Math.floor(255 * t);
+      return { r: gray, g: gray, b: gray };
+    
+    case "hot":
+      // Hot: black -> red -> yellow -> white
+      if (t < 0.33) {
+        return { r: Math.floor(255 * t * 3), g: 0, b: 0 };
+      } else if (t < 0.66) {
+        return { r: 255, g: Math.floor(255 * (t - 0.33) * 3), b: 0 };
+      } else {
+        return { r: 255, g: 255, b: Math.floor(255 * (t - 0.66) * 3) };
+      }
+    
+    case "cool":
+      // Cool: black -> blue -> cyan -> white
+      if (t < 0.5) {
+        return { r: 0, g: Math.floor(255 * t * 2), b: Math.floor(255 * t * 2) };
+      } else {
+        const val = (t - 0.5) * 2;
+        return { r: Math.floor(255 * val), g: 255, b: 255 };
+      }
+    
+    default:
+      return getPaletteColor(t, "spear");
+  }
+}
+
+function hslToRgb(h, s, l) {
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return {
+    r: Math.round(r * 255),
+    g: Math.round(g * 255),
+    b: Math.round(b * 255)
+  };
 }
 
 // ------------------------------
@@ -661,16 +764,52 @@ function drawSpectrum(frame) {
   const fftArr = frame.power_inst_dbfs || frame.power_dbfs;
   const wfArr = frame.power_inst_dbfs || frame.power_dbfs;  // instant (for waterfall)
   
-  // Diagnostic logging (throttled to every 2 seconds)
+  // Store diagnostic data for logging after display range is calculated
+  let diagnosticData = null;
   if (!window._lastFftDiag || (Date.now() - window._lastFftDiag) > 2000) {
     const fftMin = Math.min(...fftArr.map(Number).filter(Number.isFinite));
     const fftMax = Math.max(...fftArr.map(Number).filter(Number.isFinite));
     const fftMean = fftArr.map(Number).filter(Number.isFinite).reduce((a, b) => a + b, 0) / fftArr.length;
-    const noiseFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : fftMin;
-    console.log(`[FFT UI] Range: ${fftMin.toFixed(1)} to ${fftMax.toFixed(1)} dBFS, mean: ${fftMean.toFixed(1)} dBFS, floor: ${noiseFloor.toFixed(1)} dBFS, dynamic_range: ${(fftMax - noiseFloor).toFixed(1)} dB`);
-    window._lastFftDiag = Date.now();
+    const backendNoiseFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : null;
+    
+    // Frontend noise floor calculation (what we actually use)
+    const sortedF = fftArr
+      .map(Number)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    const idx = Math.max(0, Math.floor(sortedF.length * FFT_FLOOR_PCT));
+    const frontendFloorRaw = sortedF.length ? sortedF[idx] : -80;
+    
+    // Edge bin analysis
+    const edgeBinCount = Math.max(10, Math.floor(fftArr.length * 0.05));  // 5% or 10 bins
+    const edgeBinsStart = fftArr.slice(0, edgeBinCount).map(Number).filter(Number.isFinite);
+    const edgeBinsEnd = fftArr.slice(-edgeBinCount).map(Number).filter(Number.isFinite);
+    const centerStart = Math.floor(fftArr.length / 2) - Math.floor(edgeBinCount / 2);
+    const centerEnd = Math.floor(fftArr.length / 2) + Math.floor(edgeBinCount / 2);
+    const centerBins = fftArr.slice(centerStart, centerEnd).map(Number).filter(Number.isFinite);
+    
+    const edgeStartMean = edgeBinsStart.reduce((a, b) => a + b, 0) / edgeBinsStart.length;
+    const edgeStartMax = Math.max(...edgeBinsStart);
+    const edgeEndMean = edgeBinsEnd.reduce((a, b) => a + b, 0) / edgeBinsEnd.length;
+    const edgeEndMax = Math.max(...edgeBinsEnd);
+    const centerMean = centerBins.reduce((a, b) => a + b, 0) / centerBins.length;
+    const centerMax = Math.max(...centerBins);
+    
+    // Noise floor with and without edge bins
+    const excludeCount = Math.floor(fftArr.length * 0.05);
+    const centerSpectrum = fftArr.slice(excludeCount, -excludeCount).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    const floorWithoutEdgesIdx = Math.max(0, Math.floor(centerSpectrum.length * FFT_FLOOR_PCT));
+    const floorWithoutEdges = centerSpectrum.length ? centerSpectrum[floorWithoutEdgesIdx] : frontendFloorRaw;
+    
+    diagnosticData = {
+      fftMin, fftMax, fftMean, backendNoiseFloor, frontendFloorRaw, floorWithoutEdges,
+      edgeBinCount, edgeStartMean, edgeStartMax, edgeEndMean, edgeEndMax,
+      centerMean, centerMax, centerBinsLength: centerBins.length
+    };
   }
-
+  
+  // Diagnostic logging moved to after dbMax is calculated (see below, after line 1076)
+  
   // Determine power units from frame metadata or global calibration FIRST
   // Priority: frame metadata > global calibration > default (dBFS)
   // This must be done BEFORE auto-scaling so we can adjust TARGET_FLOOR_DB appropriately
@@ -749,32 +888,95 @@ function drawSpectrum(frame) {
       t = Math.max(0, Math.min(1, t));
       t = Math.pow(t, WF_GAMMA);
 
+      // Get color from selected palette
+      const color = getPaletteColor(t, waterfallPalette);
+      
       const o = x * 4;
-      data[o + 0] = Math.floor(30 * t);
-      data[o + 1] = Math.floor(255 * t);
-      data[o + 2] = Math.floor(10 * t);
+      data[o + 0] = color.r;
+      data[o + 1] = color.g;
+      data[o + 2] = color.b;
       data[o + 3] = 255;
     }
 
     ctx.putImageData(row, 0, pxFftH);
+    
+    // Draw time markers if enabled
+    if (timeMarkersEnabled) {
+      const now = frame.ts ? frame.ts * 1000 : Date.now();
+      const fps = 30; // Approximate FPS
+      
+      // Track start time if not set
+      if (!window._waterfallStartTime) {
+        window._waterfallStartTime = now;
+      }
+      
+      // Draw markers every 5 seconds
+      const markerInterval = 5000; // 5 seconds
+      const elapsed = now - window._waterfallStartTime;
+      const rowsScrolled = Math.floor((elapsed / 1000) * fps);
+      
+      ctx.strokeStyle = "rgba(60, 255, 158, 0.4)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.fillStyle = "rgba(60, 255, 158, 0.8)";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "left";
+      
+      // Draw markers for each 5-second interval
+      for (let t = 0; t <= elapsed; t += markerInterval) {
+        const ageSeconds = t / 1000;
+        if (ageSeconds > 0 && ageSeconds <= 30) {
+          const markerRows = Math.floor((t / 1000) * fps);
+          const markerY = pxFftH + markerRows;
+          
+          if (markerY >= pxFftH && markerY < pxH) {
+            ctx.beginPath();
+            ctx.moveTo(0, markerY);
+            ctx.lineTo(pxW, markerY);
+            ctx.stroke();
+            
+            // Add label
+            ctx.fillText(`${Math.floor(ageSeconds)}s`, 4, markerY - 2);
+          }
+        }
+      }
+      
+      ctx.setLineDash([]);
+    }
+    
     ctx.restore();
   }
 
   // ---------
   // Stable FFT autoscale (fixed span, smooth floor tracking)
   // - Fixed vertical span (70 dB) for stable look
+  // - Uses backend noise floor (more stable and accurate)
   // - Smoothly tracks noise floor with asymmetrical attack/release
   // - Prevents jumping (max 0.35 dB per frame movement)
   // - Makes weak signals visible by following true noise floor
   // ---------
   
-  // Robust floor estimate (percentile)
-  const sortedF = fftArr
-    .map(Number)
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-  const idx = Math.max(0, Math.floor(sortedF.length * FFT_FLOOR_PCT));
-  const floorNow = sortedF.length ? sortedF[idx] : -80;
+  // USE BACKEND NOISE FLOOR (more stable and accurate)
+  // Backend uses 10th percentile of averaged spectrum, excluding edge bins
+  // This is more accurate than frontend recalculation
+  const backendFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : null;
+  
+  // Fallback: calculate from frontend if backend value not available
+  let floorNow;
+  if (backendFloor !== null && Number.isFinite(backendFloor)) {
+    // Use backend noise floor directly
+    floorNow = backendFloor;
+  } else {
+    // Fallback: calculate from frontend (excluding edge bins)
+    const excludePct = 0.05;  // Exclude 5% from each edge
+    const excludeCount = Math.floor(fftArr.length * excludePct);
+    const centerSpectrum = fftArr.slice(excludeCount, -excludeCount)
+      .map(Number)
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    const idx = Math.max(0, Math.floor(centerSpectrum.length * FFT_FLOOR_PCT));
+    floorNow = centerSpectrum.length ? centerSpectrum[idx] : -80;
+  }
 
   // Smoothed floor with asymmetrical attack/release
   // Rises faster (attack) when floor increases, falls slowly (release) when floor decreases
@@ -785,9 +987,13 @@ function drawSpectrum(frame) {
     fftFloorSmoothed = (1 - alpha) * fftFloorSmoothed + alpha * floorNow;
   }
 
+  // Fixed reference level display (absolute dBFS values)
+  // Reference level is fixed at top, display range autoscales to show noise floor at bottom
+  // This ensures Y-axis labels show absolute dBFS values, not relative values
+  
   // Target dbMin so noise floor sits at the bottom of the chart
   const dbMinTarget = fftFloorSmoothed - FFT_FLOOR_MARGIN_DB;
-
+  
   // Clamp movement per frame to prevent hopping
   if (fftDbMinSmoothed == null) {
     fftDbMinSmoothed = dbMinTarget;
@@ -796,10 +1002,47 @@ function drawSpectrum(frame) {
   const step = Math.max(-FFT_MAX_STEP_DB, Math.min(FFT_MAX_STEP_DB, delta));
   fftDbMinSmoothed += step;
 
-  // Fixed span (stable look) - 55 dB vertical range
+  // Calculate display range with fixed reference level at top
+  // If noise floor is very low, extend range downward (but keep reference level fixed)
   const dbMin = fftDbMinSmoothed;
-  const dbMax = dbMin + FFT_VIEW_RANGE_DB;
-
+  let dbMax = dbMin + FFT_VIEW_RANGE_DB;  // Default: fixed span from noise floor
+  
+  // If calculated max exceeds reference level, use reference level and extend downward
+  if (dbMax > FFT_REFERENCE_LEVEL_DBFS) {
+    dbMax = FFT_REFERENCE_LEVEL_DBFS;
+    // Extend range downward if needed to show noise floor
+    const actualRange = dbMax - dbMin;
+    if (actualRange < FFT_VIEW_RANGE_DB) {
+      // Range is smaller than desired, but we're constrained by reference level
+      // This is OK - we'll show what we can
+    }
+  } else {
+    // Noise floor is high enough that we can use full range below reference level
+    // Keep the calculated range
+  }
+  
+  // Final display range (absolute dBFS values - labels will show these exact values)
+  
+  // Log diagnostic data now that we have display range (dbMin and dbMax are now defined)
+  if (diagnosticData) {
+    console.log(`[FFT UI] Range: ${diagnosticData.fftMin.toFixed(1)} to ${diagnosticData.fftMax.toFixed(1)} dBFS, mean: ${diagnosticData.fftMean.toFixed(1)} dBFS`);
+    console.log(`[FFT UI] Noise Floor Comparison:`);
+    console.log(`  Backend (from frame): ${diagnosticData.backendNoiseFloor !== null ? diagnosticData.backendNoiseFloor.toFixed(1) : 'N/A'} dBFS`);
+    console.log(`  Frontend (2nd pct, raw): ${diagnosticData.frontendFloorRaw.toFixed(1)} dBFS`);
+    console.log(`  Frontend (without edges): ${diagnosticData.floorWithoutEdges.toFixed(1)} dBFS`);
+    console.log(`  Difference (with vs without edges): ${(diagnosticData.frontendFloorRaw - diagnosticData.floorWithoutEdges).toFixed(1)} dB`);
+    console.log(`[FFT UI] Edge Bin Analysis:`);
+    console.log(`  Edge bins (first ${diagnosticData.edgeBinCount}): mean=${diagnosticData.edgeStartMean.toFixed(1)} dBFS, max=${diagnosticData.edgeStartMax.toFixed(1)} dBFS`);
+    console.log(`  Edge bins (last ${diagnosticData.edgeBinCount}): mean=${diagnosticData.edgeEndMean.toFixed(1)} dBFS, max=${diagnosticData.edgeEndMax.toFixed(1)} dBFS`);
+    console.log(`  Center bins (${diagnosticData.centerBinsLength}): mean=${diagnosticData.centerMean.toFixed(1)} dBFS, max=${diagnosticData.centerMax.toFixed(1)} dBFS`);
+    console.log(`  Edge elevation: start=${(diagnosticData.edgeStartMean-diagnosticData.centerMean).toFixed(1)} dB, end=${(diagnosticData.edgeEndMean-diagnosticData.centerMean).toFixed(1)} dB`);
+    // dbMin and dbMax are now defined above
+    const displayDbMin = typeof dbMin !== 'undefined' ? dbMin : diagnosticData.frontendFloorRaw;
+    const displayDbMax = typeof dbMax !== 'undefined' ? dbMax : (displayDbMin + FFT_VIEW_RANGE_DB);
+    console.log(`[FFT UI] Display Range: ${displayDbMin.toFixed(1)} to ${displayDbMax.toFixed(1)} dBFS (span: ${(displayDbMax - displayDbMin).toFixed(1)} dB)`);
+    window._lastFftDiag = Date.now();
+  }
+  
   // Apply calibration offset (display-only: Q11 dBFS -> SDR++-style if configured)
   // Backend uses true Q11 scaling internally, offset is only for UI display
   const p = fftArr.map(v => {
@@ -869,21 +1112,65 @@ function drawSpectrum(frame) {
     dbNowDisplay.push(...dbNow);
   }
   
-  const ATTACK = 0.55;  // Rise speed (0..1) - higher = faster attack (spikes appear quickly)
-  const DECAY  = 0.96;  // Fall speed (0..1) - closer to 1 = slower decay (spikes fade slowly)
-  
-  if (!lastSpectrum || lastSpectrum.length !== displayLength) {
-    lastSpectrum = dbNowDisplay.slice();
+  // Handle different trace modes
+  if (traceMode === "peak" || peakHoldEnabled) {
+    // Peak Hold mode: track maximum values with slow decay
+    if (!peakHoldSpectrum || peakHoldSpectrum.length !== displayLength) {
+      peakHoldSpectrum = dbNowDisplay.slice();
+    } else {
+      const PEAK_DECAY = 0.995;  // Very slow decay (0.5% per frame)
+      for (let i = 0; i < displayLength; i++) {
+        if (dbNowDisplay[i] > peakHoldSpectrum[i]) {
+          peakHoldSpectrum[i] = dbNowDisplay[i];  // Fast attack
+        } else {
+          peakHoldSpectrum[i] = PEAK_DECAY * peakHoldSpectrum[i] + (1 - PEAK_DECAY) * dbNowDisplay[i];  // Slow decay
+        }
+      }
+    }
+    lastSpectrum = peakHoldSpectrum.slice();
+  } else if (traceMode === "average" || averageEnabled) {
+    // Average mode: exponential moving average
+    if (!averageSpectrum || averageSpectrum.length !== displayLength) {
+      averageSpectrum = dbNowDisplay.slice();
+    } else {
+      for (let i = 0; i < displayLength; i++) {
+        averageSpectrum[i] = averageAlpha * dbNowDisplay[i] + (1 - averageAlpha) * averageSpectrum[i];
+      }
+    }
+    lastSpectrum = averageSpectrum.slice();
+  } else if (traceMode === "min") {
+    // Min Hold mode: track minimum values
+    if (!minHoldSpectrum || minHoldSpectrum.length !== displayLength) {
+      minHoldSpectrum = dbNowDisplay.slice();
+    } else {
+      const MIN_RISE = 0.99;  // Slow rise when signal increases
+      for (let i = 0; i < displayLength; i++) {
+        if (dbNowDisplay[i] < minHoldSpectrum[i]) {
+          minHoldSpectrum[i] = dbNowDisplay[i];  // Fast fall
+        } else {
+          minHoldSpectrum[i] = MIN_RISE * minHoldSpectrum[i] + (1 - MIN_RISE) * dbNowDisplay[i];  // Slow rise
+        }
+      }
+    }
+    lastSpectrum = minHoldSpectrum.slice();
   } else {
-    for (let i = 0; i < displayLength; i++) {
-      const cur = lastSpectrum[i];
-      const nxt = dbNowDisplay[i];
-      if (nxt > cur) {
-        // Fast attack: when signal rises, follow it quickly
-        lastSpectrum[i] = ATTACK * nxt + (1 - ATTACK) * cur;
-      } else {
-        // Slow decay: when signal falls, fade slowly (keeps spikes visible)
-        lastSpectrum[i] = DECAY * cur + (1 - DECAY) * nxt;
+    // Instant mode (default): fast attack, slow decay
+    const ATTACK = 0.55;  // Rise speed (0..1) - higher = faster attack (spikes appear quickly)
+    const DECAY  = 0.96;  // Fall speed (0..1) - closer to 1 = slower decay (spikes fade slowly)
+    
+    if (!lastSpectrum || lastSpectrum.length !== displayLength) {
+      lastSpectrum = dbNowDisplay.slice();
+    } else {
+      for (let i = 0; i < displayLength; i++) {
+        const cur = lastSpectrum[i];
+        const nxt = dbNowDisplay[i];
+        if (nxt > cur) {
+          // Fast attack: when signal rises, follow it quickly
+          lastSpectrum[i] = ATTACK * nxt + (1 - ATTACK) * cur;
+        } else {
+          // Slow decay: when signal falls, fade slowly (keeps spikes visible)
+          lastSpectrum[i] = DECAY * cur + (1 - DECAY) * nxt;
+        }
       }
     }
   }
@@ -1056,6 +1343,7 @@ function startNotifyWs() {
   notifyWs = new WebSocket(url);
 
   notifyWs.onopen = () => {
+    console.log("[NOTIFY WS] WebSocket connected to /ws/notify");
     console.log("[NOTIFY WS] SUCCESS: Connected! Ready for nodes, cues, and mode updates.");
     setLed("wsLed", true);
   };
@@ -1063,6 +1351,7 @@ function startNotifyWs() {
   notifyWs.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
+      console.log("[NOTIFY WS] Received message type:", msg.type, "payload:", msg.payload);
       console.log("[NOTIFY WS] Received message:", msg);
 
       if (msg.type === "tripwire_nodes") {
@@ -1156,6 +1445,7 @@ function startNotifyWs() {
       }
 
       if (msg.type === "classification_result") {
+        console.log("[NOTIFY WS] Received classification_result:", msg.payload);
         addClassification(msg.payload);
       }
 
@@ -2388,8 +2678,11 @@ async function pollCaptures() {
 // ------------------------------
 function addClassification(classification) {
   if (!classification || typeof classification !== "object") {
+    console.warn("[UI] Invalid classification object:", classification);
     return;
   }
+
+  console.log("[UI] Adding classification to buffer:", classification);
 
   // Add timestamp if not present
   if (!classification.ts) {
@@ -2404,11 +2697,17 @@ function addClassification(classification) {
     classificationBuffer.pop();
   }
 
+  console.log("[UI] Classification buffer length:", classificationBuffer.length);
   renderClassifications();
 }
 
 function renderClassifications() {
-  if (!mlClassificationsEl) return;
+  if (!mlClassificationsEl) {
+    console.warn("[UI] mlClassificationsEl not found, cannot render classifications");
+    return;
+  }
+
+  console.log("[UI] Rendering classifications, buffer length:", classificationBuffer.length);
 
   if (classificationBuffer.length === 0) {
     mlClassificationsEl.innerHTML = '<div class="muted">No classifications yet...</div>';
@@ -2563,6 +2862,16 @@ async function setNetworkInterface(interfaceName) {
 }
 
 function init() {
+  // Initialize DOM element references (ensure DOM is ready)
+  if (!mlClassificationsEl) {
+    mlClassificationsEl = document.getElementById("mlClassificationsList");
+    if (mlClassificationsEl) {
+      console.log("[UI] ML classifications element found");
+    } else {
+      console.error("[UI] ML classifications element NOT found! Check HTML.");
+    }
+  }
+  
   resizeCanvas(true);
   setEdgeMode("manual");
   initTakCollapse();
@@ -2621,6 +2930,71 @@ function init() {
       wfContrast = parseFloat(e.target.value);
       if (wfContrastValue) {
         wfContrastValue.textContent = wfContrast.toFixed(1);
+      }
+    });
+  }
+  
+  // Spectrum display controls
+  if (peakHoldCheckbox) {
+    peakHoldCheckbox.addEventListener("change", (e) => {
+      peakHoldEnabled = e.target.checked;
+      if (peakHoldEnabled && !peakHoldSpectrum) {
+        peakHoldSpectrum = null;  // Will be initialized on next frame
+      }
+      // Update trace mode select if needed
+      if (peakHoldEnabled && traceModeSelect) {
+        traceModeSelect.value = "peak";
+        traceMode = "peak";
+      }
+    });
+  }
+  
+  if (averageCheckbox) {
+    averageCheckbox.addEventListener("change", (e) => {
+      averageEnabled = e.target.checked;
+      if (averageEnabled && !averageSpectrum) {
+        averageSpectrum = null;  // Will be initialized on next frame
+      }
+      // Update trace mode select if needed
+      if (averageEnabled && traceModeSelect) {
+        traceModeSelect.value = "average";
+        traceMode = "average";
+      }
+    });
+  }
+  
+  if (traceModeSelect) {
+    traceModeSelect.addEventListener("change", (e) => {
+      traceMode = e.target.value;
+      // Update checkboxes to match
+      if (peakHoldCheckbox) {
+        peakHoldCheckbox.checked = (traceMode === "peak");
+        peakHoldEnabled = (traceMode === "peak");
+      }
+      if (averageCheckbox) {
+        averageCheckbox.checked = (traceMode === "average");
+        averageEnabled = (traceMode === "average");
+      }
+      // Clear trace buffers when switching modes
+      if (traceMode !== "peak") peakHoldSpectrum = null;
+      if (traceMode !== "average") averageSpectrum = null;
+      if (traceMode !== "min") minHoldSpectrum = null;
+    });
+  }
+  
+  if (waterfallPaletteSelect) {
+    waterfallPaletteSelect.addEventListener("change", (e) => {
+      waterfallPalette = e.target.value;
+      // Clear waterfall to apply new palette
+      clearWaterfall();
+    });
+  }
+  
+  if (timeMarkersCheckbox) {
+    timeMarkersCheckbox.addEventListener("change", (e) => {
+      timeMarkersEnabled = e.target.checked;
+      if (!timeMarkersEnabled) {
+        waterfallTimestamps = [];  // Clear timestamps when disabled
       }
     });
   }

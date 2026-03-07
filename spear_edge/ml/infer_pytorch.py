@@ -170,11 +170,22 @@ class PyTorchRfClassifier:
         # Move model to device (try GPU, fallback to CPU if needed)
         try:
             if self.device.type == "cuda" and torch.cuda.is_available():
-                # Try moving to GPU
+                # Clear GPU cache before loading to avoid OOM
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                
+                # Move model to GPU
                 self.model = self.model.to(self.device)
-                # Test GPU with a small tensor to verify it works
-                test_tensor = torch.randn(1, 1, 64, 64).to(self.device)
-                _ = self.model(test_tensor)
+                
+                # Use smaller test tensor to reduce memory usage
+                # Test with minimal size to verify GPU works
+                with torch.no_grad():
+                    test_tensor = torch.randn(1, 1, 32, 32, device=self.device)
+                    _ = self.model(test_tensor)
+                    # Clear test tensor immediately
+                    del test_tensor
+                    torch.cuda.empty_cache()
+                
                 print(f"[PyTorch] Model successfully moved to GPU")
             else:
                 # Use CPU
@@ -184,6 +195,9 @@ class PyTorchRfClassifier:
         except RuntimeError as e:
             print(f"[PyTorch] Warning: GPU operation failed: {e}")
             print(f"[PyTorch] Falling back to CPU")
+            # Make sure we clear GPU cache on error
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             self.device = torch.device("cpu")
             self.model = self.model.to(self.device)
         

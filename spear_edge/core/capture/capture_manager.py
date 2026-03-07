@@ -62,6 +62,12 @@ class CaptureManager:
         # Try PyTorch classifier first (GPU-accelerated)
         try:
             from spear_edge.ml.infer_pytorch import PyTorchRfClassifier
+            import torch
+            # Clear GPU cache before loading to avoid OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
             # Try trained model first, then fallback to dummy
             model_path = Path("spear_edge/ml/models/rf_classifier.pth")
             if not model_path.exists():
@@ -421,6 +427,30 @@ class CaptureManager:
                     if self.classifier is not None:
                         try:
                             classification = self.classifier.classify(spec_ml)
+                            label = classification.get('label', 'unknown')
+                            confidence = classification.get('confidence', 0.0)
+                            print(f"[CAPTURE] Classification result: {label} ({confidence:.2%})")
+                            
+                            # Log top-k predictions for debugging
+                            if 'topk' in classification:
+                                print(f"[CAPTURE] Top predictions:")
+                                for i, pred in enumerate(classification['topk'][:3], 1):
+                                    pred_label = pred.get('label', 'unknown')
+                                    # Handle both 'p' and 'confidence' keys (topk uses 'p')
+                                    pred_conf = pred.get('p', pred.get('confidence', 0.0))
+                                    print(f"[CAPTURE]   {i}. {pred_label}: {pred_conf:.2%}")
+                            
+                            # Publish classification result to UI (for both manual and armed captures)
+                            event_payload = {
+                                "label": label,
+                                "confidence": float(confidence),
+                                "freq_hz": req.freq_hz,
+                                "source_node": req.source_node,
+                                "scan_plan": req.scan_plan,
+                                "ts": time.time(),
+                            }
+                            print(f"[CAPTURE] Publishing classification_result event: {event_payload}")
+                            self.orch.bus.publish_nowait("classification_result", event_payload)
                         except Exception as e:
                             print(f"[CAPTURE] Classification failed: {e}")
                             import traceback

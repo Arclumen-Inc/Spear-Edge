@@ -15,7 +15,6 @@ logging.basicConfig(
 )
 
 from spear_edge.core.orchestrator.orchestrator import Orchestrator
-from spear_edge.core.capture.capture_manager import CaptureManager
 
 from spear_edge.core.sdr.bladerf_native import BladeRFNativeDevice
 
@@ -68,7 +67,8 @@ def create_app() -> FastAPI:
     # --------------------------------------------------------
     sdr = make_sdr()
     orchestrator = Orchestrator(sdr)
-    capture_manager = CaptureManager(orchestrator)
+    # Use capture_manager from orchestrator to avoid duplicate model loading
+    capture_manager = orchestrator.capture_mgr
 
     app.state.orchestrator = orchestrator
     app.state.capture_manager = capture_manager

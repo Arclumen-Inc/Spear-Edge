@@ -134,6 +134,83 @@ pre {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.spectrum-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  border: 1px solid rgba(60, 255, 158, 0.2);
+}
+
+.control-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color 0.15s ease;
+}
+
+.control-label:hover {
+  color: var(--accent-green);
+}
+
+.control-label input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent-green);
+  flex-shrink: 0;
+}
+
+.control-label input[type="checkbox"]:checked {
+  accent-color: var(--accent-green);
+}
+
+.control-label span {
+  font-family: monospace;
+  font-weight: 500;
+}
+
+.control-select {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(60, 255, 158, 0.3);
+  border-radius: 4px;
+  padding: 3px 6px;
+  color: var(--text-main);
+  font-size: 11px;
+  font-family: monospace;
+  cursor: pointer;
+  min-width: 80px;
+  transition: all 0.15s ease;
+}
+
+.control-select:hover {
+  border-color: var(--accent-green);
+  background: rgba(60, 255, 158, 0.1);
+}
+
+.control-select:focus {
+  outline: none;
+  border-color: var(--accent-green);
+  box-shadow: 0 0 6px rgba(60, 255, 158, 0.3);
 }
 
 .health-status-btn {

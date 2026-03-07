@@ -41,13 +41,9 @@ class ScanTask:
         self._running = False
 
         # Window & frequency axis are fixed for a given configuration.
-        # Use Nuttall window to match SDR++ default
-        try:
-            from scipy.signal import windows
-            self._win = windows.nuttall(self.fft_size).astype(np.float32)
-        except ImportError:
-            # Fallback to Hann if scipy not available
-            self._win = np.hanning(self.fft_size).astype(np.float32)
+        # Use Hanning window (lower sidelobes = fewer edge artifacts than Nuttall)
+        # Hanning window provides good balance between frequency resolution and sidelobe suppression
+        self._win = np.hanning(self.fft_size).astype(np.float32)
         self._freqs = (
             np.fft.fftshift(np.fft.fftfreq(self.fft_size, d=1.0 / self.sample_rate_sps))
             + self.center_freq_hz
@@ -57,9 +53,9 @@ class ScanTask:
 
         # Normalization constants for stable scaling
         # Window coherent gain (for magnitude normalization)
-        # Nuttall window coherent gain ~ 0.363 (matches SDR++ default)
+        # Hanning window coherent gain ≈ 0.5 (sum ≈ 0.5 * N)
         self._coherent_gain = float(np.sum(self._win)) / self.fft_size
-        self._window_sum = float(np.sum(self._win))  # Sum of window for coherent gain normalization (SDR++ style)
+        self._window_sum = float(np.sum(self._win))  # Sum of window for coherent gain normalization
         self._win_energy = float(np.sum(self._win * self._win))  # sum(win^2) - kept for reference
         self._eps = 1e-12
         
@@ -172,15 +168,14 @@ class ScanTask:
             x = iq * self._win
             X = np.fft.fftshift(np.fft.fft(x, n=self.fft_size))
 
-            # SDR++ coherent gain normalization (matches SDR++ behavior)
-            # SDR++ divides by sum(window) instead of N to account for window energy loss
-            # This ensures a full-scale sine wave peaks at exactly 0 dBFS
+            # Coherent gain normalization (matches SDR++ behavior)
+            # Divides by sum(window) instead of N to account for window energy loss
+            # This ensures a full-scale sine wave peaks at approximately 0 dBFS
             # Formula: mag = |X| / sum(window), then 20*log10(mag)
             # 
-            # SDR++ uses Nuttall window (coherent gain ≈ 0.363)
-            # This normalization matches SDR++ and accounts for window energy loss
-            # Note: Process gain from FFT size (SDR++ uses 65536 vs our configurable size) 
-            # will affect absolute noise floor levels, but normalization is correct
+            # Hanning window coherent gain ≈ 0.5 (sum ≈ 0.5 * N)
+            # This normalization accounts for window energy loss
+            # Note: Process gain from FFT size will affect absolute noise floor levels
             mag = np.abs(X) / self._window_sum
             spec_db = 20.0 * np.log10(mag + self._eps)
 
@@ -191,7 +186,16 @@ class ScanTask:
                 self._avg_db = (self._avg_alpha * spec_db + (1.0 - self._avg_alpha) * self._avg_db).astype(np.float32)
 
             # Robust noise floor estimate from averaged spectrum
-            noise_floor_db = float(np.percentile(self._avg_db, 10))
+            # EXCLUDE edge bins (first/last 5%) from noise floor calculation
+            # Edge bins are 20+ dB higher due to window sidelobes and don't represent true noise floor
+            exclude_pct = 0.05  # Exclude 5% from each edge
+            exclude_count = int(len(self._avg_db) * exclude_pct)
+            if exclude_count > 0 and exclude_count < len(self._avg_db) // 2:
+                center_spectrum = self._avg_db[exclude_count:-exclude_count]
+                noise_floor_db = float(np.percentile(center_spectrum, 10))
+            else:
+                # Fallback to full spectrum if exclusion would be too aggressive
+                noise_floor_db = float(np.percentile(self._avg_db, 10))
             
             # SDR++-style FFT smoothing (smoothing=100, alpha=0.01)
             # Smooth the entire spectrum for display (reduces noise variance)
@@ -215,6 +219,19 @@ class ScanTask:
             power_line = self._fft_smoothed.astype(np.float32)  # Smoothed for FFT display
             power_inst = spec_db.astype(np.float32)  # Instant for waterfall
             
+            # ZERO edge bins (first/last 2.5%) for display to remove visual humps
+            # Edge bins are 20+ dB higher due to window sidelobes and don't represent real signal energy
+            edge_zero_pct = 0.025  # Zero 2.5% from each edge (5% total)
+            edge_zero_count = int(len(power_line) * edge_zero_pct)
+            if edge_zero_count > 0:
+                # Zero edge bins in both FFT line and waterfall
+                # Set to noise floor - 10 dB (below display, effectively hidden)
+                edge_zero_value = noise_floor_db - 10.0
+                power_line[:edge_zero_count] = edge_zero_value
+                power_line[-edge_zero_count:] = edge_zero_value
+                power_inst[:edge_zero_count] = edge_zero_value
+                power_inst[-edge_zero_count:] = edge_zero_value
+            
             # Diagnostic: Check sample levels and peak power
             if frame_count % 150 == 0:  # Every 150 frames (~10 seconds at 15 fps)
                 sample_mag_max = float(np.max(np.abs(iq)))
@@ -230,16 +247,60 @@ class ScanTask:
                 # Calculate theoretical noise floor for comparison
                 # For coherent gain normalization: mag = |X| / sum(window)
                 # For white noise: |X| ≈ sqrt(N) per bin, so mag ≈ sqrt(N)/sum(window)
-                # For Nuttall window: sum(window) ≈ 0.363*N, so mag ≈ sqrt(N)/(0.363*N) = 2.75/sqrt(N)
-                # dB = 20*log10(2.75/sqrt(N)) = 20*log10(2.75) - 10*log10(N) = 8.79 - 10*log10(N)
-                # For N=1024: theoretical ≈ 8.79 - 30.1 = -21.3 dBFS
-                # For N=4096: theoretical ≈ 8.79 - 36.1 = -27.3 dBFS
-                nuttall_coherent_gain = 0.363  # Approximate for Nuttall window
-                theoretical_floor = 20.0 * np.log10(1.0 / nuttall_coherent_gain) - 10.0 * np.log10(self.fft_size)
+                # For Hanning window: sum(window) ≈ 0.5*N, so mag ≈ sqrt(N)/(0.5*N) = 2.0/sqrt(N)
+                # dB = 20*log10(2.0/sqrt(N)) = 20*log10(2.0) - 10*log10(N) = 6.02 - 10*log10(N)
+                # For N=1024: theoretical ≈ 6.02 - 30.1 = -24.1 dBFS
+                # For N=4096: theoretical ≈ 6.02 - 36.1 = -30.1 dBFS
+                hanning_coherent_gain = 0.5  # Approximate for Hanning window
+                theoretical_floor = 20.0 * np.log10(1.0 / hanning_coherent_gain) - 10.0 * np.log10(self.fft_size)
+                
+                # EDGE BIN DIAGNOSTICS
+                edge_bin_count = max(10, self.fft_size // 20)  # 5% of bins or 10, whichever is larger
+                edge_bins_start = spec_db[:edge_bin_count]
+                edge_bins_end = spec_db[-edge_bin_count:]
+                center_start_idx = len(spec_db) // 2 - edge_bin_count // 2
+                center_end_idx = len(spec_db) // 2 + edge_bin_count // 2
+                center_bins = spec_db[center_start_idx:center_end_idx]
+                
+                edge_start_mean = float(np.mean(edge_bins_start))
+                edge_start_max = float(np.max(edge_bins_start))
+                edge_end_mean = float(np.mean(edge_bins_end))
+                edge_end_max = float(np.max(edge_bins_end))
+                center_mean = float(np.mean(center_bins))
+                center_max = float(np.max(center_bins))
+                
+                # Noise floor with and without edge bins
+                exclude_pct = 0.05  # Exclude 5% from each edge
+                exclude_count = int(len(spec_db) * exclude_pct)
+                if exclude_count > 0 and exclude_count < len(spec_db) // 2:
+                    center_spectrum = spec_db[exclude_count:-exclude_count]
+                    floor_without_edges = float(np.percentile(center_spectrum, 10))
+                else:
+                    floor_without_edges = noise_floor_db
+                
+                # Frontend equivalent calculation (2nd percentile of raw spectrum)
+                frontend_floor_equiv = float(np.percentile(spec_db, 2))
+                
+                # DC offset diagnostics
+                dc_before = float(np.mean(iq))
+                iq_dc_removed = iq - dc_before
+                dc_after = float(np.mean(iq_dc_removed))
+                
                 print(f"[SCAN] Diagnostics: samples max={sample_mag_max:.6f} mean={sample_mag_mean:.6f} std={sample_mag_std:.6f}, "
                       f"FFT mag max={mag_max:.6e} mean={mag_mean:.6e}, "
                       f"peak={peak_power_db:.1f} dBFS@bin{peak_power_idx}, floor={noise_floor_db:.1f} dBFS (theoretical={theoretical_floor:.1f} dBFS), "
                       f"range={peak_power_db - noise_floor_db:.1f} dB, SNR={self._snr_smoothed:.1f} dB (smoothed), signal_bins={signal_bins}")
+                print(f"[SCAN] Edge Bin Analysis:")
+                print(f"  Edge bins (first {edge_bin_count}): mean={edge_start_mean:.1f} dBFS, max={edge_start_max:.1f} dBFS")
+                print(f"  Edge bins (last {edge_bin_count}): mean={edge_end_mean:.1f} dBFS, max={edge_end_max:.1f} dBFS")
+                print(f"  Center bins ({len(center_bins)}): mean={center_mean:.1f} dBFS, max={center_max:.1f} dBFS")
+                print(f"  Edge elevation: start={edge_start_mean-center_mean:.1f} dB, end={edge_end_mean-center_mean:.1f} dB")
+                print(f"[SCAN] Noise Floor Comparison:")
+                print(f"  Backend (10th pct, averaged): {noise_floor_db:.1f} dBFS")
+                print(f"  Frontend equiv (2nd pct, raw): {frontend_floor_equiv:.1f} dBFS")
+                print(f"  Without edge bins (10th pct): {floor_without_edges:.1f} dBFS")
+                print(f"  Difference (with vs without edges): {noise_floor_db - floor_without_edges:.1f} dB")
+                print(f"[SCAN] DC Offset: before={dc_before:.6f}, after={dc_after:.6f}, removed={dc_before-dc_after:.6f}")
 
             # Build truth frame
             # Do NOT send giant freqs array every frame (client can reconstruct)

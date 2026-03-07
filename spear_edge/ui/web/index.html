@@ -289,7 +289,43 @@
     
       <!-- RF SPECTRUM -->
       <div class="panel">
-        <div class="panel-header">RF Spectrum</div>
+        <div class="panel-header">
+          <span>RF Spectrum</span>
+          <div class="spectrum-controls">
+            <!-- FFT Controls -->
+            <div class="control-group">
+              <label class="control-label" title="Peak Hold">
+                <input type="checkbox" id="peakHoldCheckbox">
+                <span>Peak</span>
+              </label>
+              <label class="control-label" title="Average Trace">
+                <input type="checkbox" id="averageCheckbox">
+                <span>Avg</span>
+              </label>
+              <select id="traceModeSelect" class="control-select" title="Trace Display Mode">
+                <option value="instant">Instant</option>
+                <option value="peak">Peak Hold</option>
+                <option value="average">Average</option>
+                <option value="min">Min Hold</option>
+              </select>
+            </div>
+            
+            <!-- Waterfall Controls -->
+            <div class="control-group">
+              <select id="waterfallPaletteSelect" class="control-select" title="Waterfall Color Palette">
+                <option value="spear">SPEAR Green</option>
+                <option value="rainbow">Rainbow</option>
+                <option value="grayscale">Grayscale</option>
+                <option value="hot">Hot</option>
+                <option value="cool">Cool</option>
+              </select>
+              <label class="control-label" title="Show Time Markers">
+                <input type="checkbox" id="timeMarkersCheckbox">
+                <span>Time</span>
+              </label>
+            </div>
+          </div>
+        </div>
     
         <!-- ARMED WARNING BANNER -->
         <div id="armedBanner" class="armed-banner">

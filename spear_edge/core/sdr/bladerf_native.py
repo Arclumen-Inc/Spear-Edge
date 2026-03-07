@@ -130,6 +130,21 @@ if _libbladerf is not None:
     ]
     _libbladerf.bladerf_sync_rx.restype = ctypes.c_int
     
+    # Version query functions
+    class bladerf_version(ctypes.Structure):
+        _fields_ = [
+            ("major", ctypes.c_uint16),
+            ("minor", ctypes.c_uint16),
+            ("patch", ctypes.c_uint16),
+            ("describe", ctypes.c_char_p),  # Version string (may be None)
+        ]
+    
+    _libbladerf.bladerf_fw_version.argtypes = [ctypes.c_void_p, ctypes.POINTER(bladerf_version)]
+    _libbladerf.bladerf_fw_version.restype = ctypes.c_int
+    
+    _libbladerf.bladerf_fpga_version.argtypes = [ctypes.c_void_p, ctypes.POINTER(bladerf_version)]
+    _libbladerf.bladerf_fpga_version.restype = ctypes.c_int
+    
     # Error handling
     _libbladerf.bladerf_strerror.argtypes = [ctypes.c_int]
     _libbladerf.bladerf_strerror.restype = ctypes.c_char_p
@@ -224,6 +239,14 @@ class BladeRFNativeDevice(SDRBase):
 
         self.dev = dev_ptr
         logger.info("BladeRFNativeDevice: Device opened successfully")
+        
+        # Query firmware and FPGA versions
+        self._fw_version = self._query_fw_version()
+        self._fpga_version = self._query_fpga_version()
+        if self._fw_version:
+            logger.info(f"BladeRF Firmware: {self._fw_version['major']}.{self._fw_version['minor']}.{self._fw_version['patch']}")
+        if self._fpga_version:
+            logger.info(f"BladeRF FPGA: {self._fpga_version['major']}.{self._fpga_version['minor']}.{self._fpga_version['patch']}")
         
         # CRITICAL: Ensure BT200 is OFF on device open (hardware not connected)
         # BT200 should only be enabled if user explicitly sets it via apply_config()
@@ -1057,9 +1080,47 @@ class BladeRFNativeDevice(SDRBase):
             "usb_speed": "USB 3.0",
         }
 
+    def _query_fw_version(self) -> Optional[Dict[str, Any]]:
+        """Query firmware version from device."""
+        if self.dev is None:
+            return None
+        
+        try:
+            version = bladerf_version()
+            ret = _libbladerf.bladerf_fw_version(self.dev, ctypes.byref(version))
+            if ret == 0:
+                return {
+                    "major": version.major,
+                    "minor": version.minor,
+                    "patch": version.patch,
+                    "describe": version.describe.decode('utf-8') if version.describe else None
+                }
+        except Exception as e:
+            logger.warning(f"Failed to query firmware version: {e}")
+        return None
+    
+    def _query_fpga_version(self) -> Optional[Dict[str, Any]]:
+        """Query FPGA version from device."""
+        if self.dev is None:
+            return None
+        
+        try:
+            version = bladerf_version()
+            ret = _libbladerf.bladerf_fpga_version(self.dev, ctypes.byref(version))
+            if ret == 0:
+                return {
+                    "major": version.major,
+                    "minor": version.minor,
+                    "patch": version.patch,
+                    "describe": version.describe.decode('utf-8') if version.describe else None
+                }
+        except Exception as e:
+            logger.warning(f"Failed to query FPGA version: {e}")
+        return None
+    
     def get_info(self) -> dict:
         """Return device info for UI."""
-        return {
+        info = {
             "driver": "bladerf_native",
             "label": "bladeRF 2.0 (Native)",
             "serial": "unknown",  # Can query from device if needed
@@ -1076,3 +1137,11 @@ class BladeRFNativeDevice(SDRBase):
                 "ch1": self.bt200_enabled.get(1, False),
             },
         }
+        
+        # Add version information if available
+        if hasattr(self, '_fw_version') and self._fw_version:
+            info["firmware_version"] = f"{self._fw_version['major']}.{self._fw_version['minor']}.{self._fw_version['patch']}"
+        if hasattr(self, '_fpga_version') and self._fpga_version:
+            info["fpga_version"] = f"{self._fpga_version['major']}.{self._fpga_version['minor']}.{self._fpga_version['patch']}"
+        
+        return info
