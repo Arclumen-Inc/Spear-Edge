@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <title>SPEAR-Edge</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
 
   <!-- Main stylesheet -->
   <link rel="stylesheet" href="styles.css" />
@@ -19,6 +20,9 @@
     <!-- LEFT: TITLE -->
     <div id="title">
       SPEAR-EDGE
+    </div>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <a href="/ml" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">ML Dashboard</a>
     </div>
 
     <!-- RIGHT: STATUS + CONTROLS -->
@@ -189,6 +193,7 @@
         <!-- SDR STATUS (READ-ONLY) -->
         <div class="sdr-status">
           <div><strong>SDR:</strong> <span id="sdr-driver">—</span></div>
+          <div><strong>RX Port:</strong> <span id="sdr-rx-port">—</span></div>
           <div><strong>Center:</strong> <span id="sdr-center">—</span></div>
           <div><strong>Rate:</strong> <span id="sdr-rate">—</span></div>
           <div><strong>Gain:</strong> <span id="sdr-gain">—</span></div>
@@ -214,6 +219,8 @@
           <label>
             FFT Size
             <select id="fftSizeSelect">
+              <option value="1024">1024</option>
+              <option value="2048">2048</option>
               <option value="4096" selected>4096</option>
               <option value="8192">8192</option>
               <option value="16384">16384</option>
@@ -314,6 +321,11 @@
               <label class="control-label" title="Show Time Markers">
                 <input type="checkbox" id="timeMarkersCheckbox">
                 <span>Time</span>
+              </label>
+              <label class="control-label" title="FFT Smoothing (lower = more smoothing, higher = less smoothing)">
+                <span style="font-size: 0.85em; margin-right: 4px;">Smooth:</span>
+                <input type="range" id="smoothingSlider" min="0" max="100" value="9" step="1" style="width: 80px; vertical-align: middle;">
+                <span id="smoothingValue" style="font-size: 0.85em; margin-left: 4px; min-width: 40px; display: inline-block;">0.10</span>
               </label>
             </div>
           </div>

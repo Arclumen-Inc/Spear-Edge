@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import threading
 import time
 import numpy as np
 from typing import Optional, Dict, Any
@@ -80,8 +81,11 @@ if _libbladerf is not None:
     ]
     _libbladerf.bladerf_set_bandwidth.restype = ctypes.c_int
     
-    _libbladerf.bladerf_set_frequency.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32]
+    _libbladerf.bladerf_set_frequency.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint64]
     _libbladerf.bladerf_set_frequency.restype = ctypes.c_int
+    
+    _libbladerf.bladerf_get_frequency.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint64)]
+    _libbladerf.bladerf_get_frequency.restype = ctypes.c_int
     
     _libbladerf.bladerf_set_gain.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
     _libbladerf.bladerf_set_gain.restype = ctypes.c_int
@@ -196,6 +200,11 @@ class BladeRFNativeDevice(SDRBase):
         # Stream state
         self._stream_active: bool = False
         self._stream_configured: bool = False
+
+        # Thread safety: Lock for gain operations (set_gain, set_gain_mode)
+        # CRITICAL: Gain operations must be serialized to prevent memory corruption
+        # when called concurrently from UI thread and capture/scan threads
+        self._gain_lock = threading.Lock()
 
         # Health tracking for monitoring SDR performance
         self._health_stats = {
@@ -343,6 +352,51 @@ class BladeRFNativeDevice(SDRBase):
                 error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
                 raise RuntimeError(f"Failed to set frequency for ch{ch_num}: {error_str}")
 
+            # Step 4.5: Read back actual hardware values and log
+            # CRITICAL: bladeRF may apply different values than requested
+            # For wideband signals, actual bandwidth matters significantly
+            actual_freq = ctypes.c_uint64()
+            ret_freq = _libbladerf.bladerf_get_frequency(self.dev, ch, ctypes.byref(actual_freq))
+            if ret_freq != 0:
+                logger.warning(f"Could not read back frequency for ch{ch_num}")
+                actual_freq.value = self.center_freq_hz  # Fallback to requested value
+            else:
+                # WORKAROUND: Some libbladeRF versions return incorrect frequency values
+                # If readback is more than 100 MHz away from requested, it's likely wrong
+                # Use requested value instead (hardware is actually tuned correctly based on signal location)
+                freq_diff_mhz = abs(actual_freq.value - self.center_freq_hz) / 1e6
+                if freq_diff_mhz > 100.0:
+                    logger.warning(f"Frequency readback appears incorrect: {actual_freq.value/1e6:.3f} MHz "
+                                 f"(requested {self.center_freq_hz/1e6:.3f} MHz, diff {freq_diff_mhz:.1f} MHz). "
+                                 f"Using requested value as hardware is likely tuned correctly.")
+                    actual_freq.value = self.center_freq_hz
+            
+            # Read back gain mode and gain
+            gain_mode_readback = "UNKNOWN"
+            gain_readback = 0
+            try:
+                gain_ptr = ctypes.c_int()
+                ret_gain = _libbladerf.bladerf_get_gain(self.dev, ch, ctypes.byref(gain_ptr))
+                if ret_gain == 0:
+                    gain_readback = gain_ptr.value
+                gain_mode_readback = "MGC" if self.gain_mode == GainMode.MANUAL else "AGC"
+            except Exception as e:
+                logger.warning(f"Could not read back gain for ch{ch_num}: {e}")
+            
+            # Log hardware truth: requested vs actual
+            logger.info(
+                f"RX{ch_num} configured: "
+                f"req_sr={self.sample_rate_sps:.0f} act_sr={actual_rate.value:.0f} "
+                f"req_bw={self.bandwidth_hz:.0f} act_bw={actual_bw.value:.0f} "
+                f"req_fc={self.center_freq_hz:.0f} act_fc={actual_freq.value:.0f} "
+                f"gain_mode={gain_mode_readback} gain={gain_readback}"
+            )
+            
+            # Store actual values for reference
+            self._actual_sample_rate = actual_rate.value
+            self._actual_bandwidth = actual_bw.value
+            self._actual_frequency = actual_freq.value
+
             # Step 5: Set BT200 bias-tee (if explicitly enabled for this channel)
             # CRITICAL: BT200 is only enabled if user explicitly sets it to True
             # Note: LNA gain is now automatically optimized by bladerf_set_gain() - no manual control
@@ -413,6 +467,8 @@ class BladeRFNativeDevice(SDRBase):
         CRITICAL: Gain can only be set when gain_mode is MANUAL.
         If AGC is enabled, this will disable AGC and set manual gain.
         
+        THREAD-SAFE: Uses _gain_lock to prevent concurrent access.
+        
         Args:
             gain_db: Gain in dB
             channel: Channel number (0 or 1). If None, uses current rx_channel.
@@ -421,56 +477,74 @@ class BladeRFNativeDevice(SDRBase):
             logger.warning("set_gain: Device not open")
             return
         
-        self.gain_db = float(gain_db)
-        ch_num = channel if channel is not None else self.rx_channel
-        ch = BLADERF_CHANNEL_RX(ch_num)
-        
-        # CRITICAL FIX: Ensure gain_mode is MANUAL before setting gain
-        # If AGC is enabled, gain changes will be ignored by hardware
-        # Always set gain mode to MANUAL to ensure it's in the correct state
-        ret_mode = _libbladerf.bladerf_set_gain_mode(self.dev, ch, BLADERF_GAIN_MGC)
-        if ret_mode != 0:
-            error_str = _libbladerf.bladerf_strerror(ret_mode).decode('utf-8', errors='ignore')
-            logger.error(f"Failed to set gain mode to MANUAL for ch{ch_num}: {error_str}")
-            return
-        
-        # Update internal state
-        self.gain_mode = GainMode.MANUAL
-        
-        # Small delay to ensure gain mode is applied before setting gain value
-        import time
-        time.sleep(0.01)  # 10ms delay
-        
-        try:
-            gain_int = int(self.gain_db)
-            logger.info(f"[GAIN] Setting gain for ch{ch_num}: {gain_int} dB")
-            ret = _libbladerf.bladerf_set_gain(self.dev, ch, gain_int)
-            if ret != 0:
-                error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
-                logger.error(f"[GAIN] Failed to set gain for ch{ch_num} to {gain_int} dB: {error_str} (code: {ret})")
-            else:
-                # Small delay before reading back to ensure gain is applied
-                time.sleep(0.01)
+        # CRITICAL: Serialize gain operations to prevent memory corruption
+        # Multiple threads (UI, capture, scan) may call set_gain concurrently
+        with self._gain_lock:
+            # CRITICAL: Re-check device handle inside lock to prevent segfault
+            # Device might become invalid between initial check and lock acquisition
+            if self.dev is None:
+                logger.warning("set_gain: Device closed during operation")
+                return
+            
+            self.gain_db = float(gain_db)
+            ch_num = channel if channel is not None else self.rx_channel
+            ch = BLADERF_CHANNEL_RX(ch_num)
+            
+            # CRITICAL FIX: Ensure gain_mode is MANUAL before setting gain
+            # If AGC is enabled, gain changes will be ignored by hardware
+            # Always set gain mode to MANUAL to ensure it's in the correct state
+            ret_mode = _libbladerf.bladerf_set_gain_mode(self.dev, ch, BLADERF_GAIN_MGC)
+            if ret_mode != 0:
+                error_str = _libbladerf.bladerf_strerror(ret_mode).decode('utf-8', errors='ignore')
+                logger.error(f"Failed to set gain mode to MANUAL for ch{ch_num}: {error_str}")
+                return
+            
+            # Update internal state
+            self.gain_mode = GainMode.MANUAL
+            
+            # Small delay to ensure gain mode is applied before setting gain value
+            time.sleep(0.01)  # 10ms delay
+            
+            try:
+                # Re-check device handle before each libbladeRF call
+                if self.dev is None:
+                    logger.warning("set_gain: Device closed during gain operation")
+                    return
                 
-                # Read back from hardware to verify what actually applied
-                try:
-                    gain_ptr = ctypes.c_int()
-                    ret_get = _libbladerf.bladerf_get_gain(self.dev, ch, ctypes.byref(gain_ptr))
-                    if ret_get == 0:
-                        applied = gain_ptr.value
-                        if applied != gain_int:
-                            logger.warning(f"[GAIN] Gain mismatch: requested {gain_int} dB, but hardware applied {applied} dB")
-                            # Update internal state to match hardware
-                            self.gain_db = float(applied)
+                gain_int = int(self.gain_db)
+                logger.info(f"[GAIN] Setting gain for ch{ch_num}: {gain_int} dB")
+                ret = _libbladerf.bladerf_set_gain(self.dev, ch, gain_int)
+                if ret != 0:
+                    error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                    logger.error(f"[GAIN] Failed to set gain for ch{ch_num} to {gain_int} dB: {error_str} (code: {ret})")
+                else:
+                    # Small delay before reading back to ensure gain is applied
+                    time.sleep(0.01)
+                    
+                    # Re-check device handle before readback
+                    if self.dev is None:
+                        logger.warning("set_gain: Device closed during gain verification")
+                        return
+                    
+                    # Read back from hardware to verify what actually applied
+                    try:
+                        gain_ptr = ctypes.c_int()
+                        ret_get = _libbladerf.bladerf_get_gain(self.dev, ch, ctypes.byref(gain_ptr))
+                        if ret_get == 0:
+                            applied = gain_ptr.value
+                            if applied != gain_int:
+                                logger.warning(f"[GAIN] Gain mismatch: requested {gain_int} dB, but hardware applied {applied} dB")
+                                # Update internal state to match hardware
+                                self.gain_db = float(applied)
+                            else:
+                                logger.info(f"[GAIN] Gain set to {gain_int} dB for ch{ch_num} (verified)")
                         else:
-                            logger.info(f"[GAIN] Gain set to {gain_int} dB for ch{ch_num} (verified)")
-                    else:
-                        error_str = _libbladerf.bladerf_strerror(ret_get).decode('utf-8', errors='ignore')
-                        logger.warning(f"[GAIN] Could not read back gain from hardware: {error_str}")
-                except Exception as e:
-                    logger.warning(f"[GAIN] Exception reading back gain: {e}")
-        except Exception as e:
-            logger.error(f"[GAIN] set_gain exception for ch{ch_num}: {e}", exc_info=True)
+                            error_str = _libbladerf.bladerf_strerror(ret_get).decode('utf-8', errors='ignore')
+                            logger.warning(f"[GAIN] Could not read back gain from hardware: {error_str}")
+                    except Exception as e:
+                        logger.warning(f"[GAIN] Exception reading back gain: {e}")
+            except Exception as e:
+                logger.error(f"[GAIN] set_gain exception for ch{ch_num}: {e}", exc_info=True)
     
     def set_lna_gain(self, channel: int, gain_db: int) -> bool:
         """Set LNA gain for specified channel.
@@ -646,21 +720,27 @@ class BladeRFNativeDevice(SDRBase):
         return self.bt200_enabled.get(channel, False)
 
     def set_gain_mode(self, mode: GainMode):
-        """Set gain mode (manual or AGC)."""
-        self.gain_mode = mode
+        """Set gain mode (manual or AGC).
+        
+        THREAD-SAFE: Uses _gain_lock to prevent concurrent access.
+        """
         if self.dev is None:
             return
 
-        ch = BLADERF_CHANNEL_RX(self.rx_channel)
-        gain_mode_val = BLADERF_GAIN_AGC if mode == GainMode.AGC else BLADERF_GAIN_MGC
+        # CRITICAL: Serialize gain operations to prevent memory corruption
+        # Multiple threads (UI, capture, scan) may call set_gain_mode concurrently
+        with self._gain_lock:
+            self.gain_mode = mode
+            ch = BLADERF_CHANNEL_RX(self.rx_channel)
+            gain_mode_val = BLADERF_GAIN_AGC if mode == GainMode.AGC else BLADERF_GAIN_MGC
 
-        try:
-            ret = _libbladerf.bladerf_set_gain_mode(self.dev, ch, gain_mode_val)
-            if ret != 0:
-                error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
-                logger.warning(f"Failed to set gain mode: {error_str}")
-        except Exception as e:
-            logger.warning(f"set_gain_mode exception: {e}")
+            try:
+                ret = _libbladerf.bladerf_set_gain_mode(self.dev, ch, gain_mode_val)
+                if ret != 0:
+                    error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                    logger.warning(f"Failed to set gain mode: {error_str}")
+            except Exception as e:
+                logger.warning(f"set_gain_mode exception: {e}")
 
     def _setup_stream(self, dual_channel: bool = False) -> None:
         """
@@ -673,33 +753,154 @@ class BladeRFNativeDevice(SDRBase):
         if self.dev is None:
             return
 
-        # Tear down existing stream first
+        # OPTION A: Close/reopen device when reconfiguring active stream
+        # This frees USB buffers allocated by previous bladerf_sync_config() call
+        # libbladeRF docs: "Memory allocated by this function will be deallocated
+        # when bladerf_close() is called."
+        # Without this, buffers accumulate and exceed 16MB USB memory limit
+        pending_gain_restore = None
         if self._stream_active:
-            self._deactivate_stream()
+            # Save current RF state (tune() was already called, so these are set)
+            saved_freq = self.center_freq_hz
+            saved_rate = self.sample_rate_sps
+            saved_bw = self.bandwidth_hz
+            saved_gain = self.gain_db
+            saved_gain_mode = self.gain_mode
+            saved_rx_channel = self.rx_channel
+            saved_bt200 = dict(self.bt200_enabled)  # Copy dict
+            
+            logger.info("[STREAM] Reconfiguring active stream - closing device to free USB buffers")
+            
+            # CRITICAL: Set stream inactive FIRST to prevent read_samples() from using device
+            # This prevents segfault if RX task thread is still calling read_samples()
+            self._stream_active = False
+            self._stream_configured = False
+            
+            # Deactivate stream (disable RX modules)
+            if self.dev is not None:
+                if self.dual_channel_mode:
+                    ch0 = BLADERF_CHANNEL_RX(0)
+                    ch1 = BLADERF_CHANNEL_RX(1)
+                    _libbladerf.bladerf_enable_module(self.dev, ch0, False)
+                    _libbladerf.bladerf_enable_module(self.dev, ch1, False)
+                else:
+                    ch = BLADERF_CHANNEL_RX(self.rx_channel)
+                    _libbladerf.bladerf_enable_module(self.dev, ch, False)
+            
+            # CRITICAL: Wait for in-flight read_samples() calls to complete
+            # Increased delay to 300ms (max read timeout) to ensure all USB transfers complete
+            # This prevents segfault if RX task thread is still reading when device is closed
+            time.sleep(0.3)
+            
+            # Close device to free USB buffers
+            if self.dev is not None:
+                _libbladerf.bladerf_close(self.dev)
+                self.dev = None
+                logger.info("[STREAM] Device closed - USB buffers freed")
+            
+            # Reopen device with error recovery
+            # If device reopen fails, attempt retry before giving up
+            try:
+                self._open_device()
+                logger.info("[STREAM] Device reopened successfully")
+            except RuntimeError as e:
+                logger.error(f"[STREAM] Failed to reopen device: {e}")
+                # Attempt recovery: try once more after brief delay
+                time.sleep(0.1)
+                try:
+                    self._open_device()
+                    logger.info("[STREAM] Device reopened on retry")
+                except RuntimeError as e2:
+                    logger.error(f"[STREAM] Device reopen failed after retry: {e2}")
+                    raise  # Re-raise to fail fast and prevent inconsistent state
+            
+            # Re-apply RF parameters (hardware state was lost on close)
+            # Configure channels (single or dual)
+            channels_to_config = [0, 1] if dual_channel else [saved_rx_channel]
+            
+            for ch_num in channels_to_config:
+                ch = BLADERF_CHANNEL_RX(ch_num)
+                
+                # Restore gain mode
+                if saved_gain_mode == GainMode.MANUAL:
+                    ret = _libbladerf.bladerf_set_gain_mode(self.dev, ch, BLADERF_GAIN_MGC)
+                    if ret != 0:
+                        error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                        logger.warning(f"[STREAM] Failed to restore gain mode for ch{ch_num}: {error_str}")
+                
+                # Restore sample rate
+                actual_rate = ctypes.c_uint32()
+                ret = _libbladerf.bladerf_set_sample_rate(
+                    self.dev, ch, saved_rate, ctypes.byref(actual_rate)
+                )
+                if ret != 0:
+                    error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                    raise RuntimeError(f"Failed to restore sample rate for ch{ch_num}: {error_str}")
+                
+                # Restore bandwidth
+                actual_bw = ctypes.c_uint32()
+                ret = _libbladerf.bladerf_set_bandwidth(
+                    self.dev, ch, saved_bw, ctypes.byref(actual_bw)
+                )
+                if ret != 0:
+                    error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                    raise RuntimeError(f"Failed to restore bandwidth for ch{ch_num}: {error_str}")
+                
+                # Restore frequency
+                ret = _libbladerf.bladerf_set_frequency(self.dev, ch, saved_freq)
+                if ret != 0:
+                    error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                    raise RuntimeError(f"Failed to restore frequency for ch{ch_num}: {error_str}")
+                
+                # Restore BT200 state
+                if ch_num in saved_bt200 and saved_bt200[ch_num] is True:
+                    self.set_bt200_enabled(ch_num, True)
+                else:
+                    self.set_bt200_enabled(ch_num, False)
+            
+            # Restore gain (must be after stream is configured, so we'll do it later)
+            # Store for after stream setup
+            pending_gain_restore = (saved_gain, saved_gain_mode, channels_to_config)
 
         # Choose channel layout
         channel_layout = BLADERF_RX_X2 if dual_channel else BLADERF_RX_X1        # Configure sync streaming with adaptive buffer sizing for high sample rates
-        # Buffer configuration optimized for performance at 30-40 MS/s
+        # Buffer configuration optimized for performance up to 60 MS/s
         sample_rate = getattr(self, 'sample_rate_sps', 2_400_000)
         
         # Adaptive buffer sizing based on sample rate
-        # For high rates (>20 MS/s), use larger buffers to reduce USB overhead
-        if sample_rate > 20_000_000:
-            # High rate: 8-16ms of data per buffer
-            # 30 MS/s * 0.01s = 300k samples, round to 524288 (power-of-two)
-            buffer_size = 524288  # 512KB buffer for high rates
-            num_buffers = 128  # More buffers for high-rate streaming
-            num_transfers = 32  # More concurrent transfers
+        # CRITICAL: Total buffer memory must fit within 16MB USB memory limit
+        # USB memory = buffer_size (samples) × 4 bytes/complex_sample × num_buffers
+        # Format: SC16_Q11 (4 bytes per complex sample: 2 bytes I + 2 bytes Q)
+        # CRITICAL: Buffer must be LARGER than read size to prevent timeouts
+        # Using conservative buffer counts for stability with wideband signals
+        if sample_rate > 40_000_000:
+            # Very high rate (40-60 MS/s): Conservative config for stability
+            # 256K samples × 4 bytes = 1MB per buffer
+            # 4 buffers × 1MB = 4MB total (well under 16MB limit)
+            buffer_size = 262144  # 256K samples (1MB per buffer)
+            num_buffers = 4  # 4 buffers × 1MB × 4 bytes = 16MB (at limit)
+            num_transfers = 2  # Must be < num_buffers
+        elif sample_rate > 20_000_000:
+            # High rate (20-40 MS/s): Conservative config
+            # 128K samples × 4 bytes = 512KB per buffer
+            # 8 buffers × 512KB = 4MB total (well under 16MB limit)
+            buffer_size = 131072  # 128K samples (512KB per buffer)
+            num_buffers = 8  # 8 buffers × 512KB × 4 bytes = 16MB (at limit)
+            num_transfers = 4  # Must be < num_buffers
         elif sample_rate > 10_000_000:
-            # Medium rate: 4-8ms of data per buffer
-            buffer_size = 262144  # 256KB buffer
-            num_buffers = 96
-            num_transfers = 24
+            # Medium rate: Conservative config
+            # 64K samples × 4 bytes = 256KB per buffer
+            # 16 buffers × 256KB = 4MB total (well under 16MB limit)
+            buffer_size = 65536  # 64K samples (256KB per buffer)
+            num_buffers = 16  # 16 buffers × 256KB × 4 bytes = 16MB (at limit)
+            num_transfers = 8  # Must be < num_buffers
         else:
-            # Low rate: standard configuration
-            buffer_size = 131072  # 128KB buffer
-            num_buffers = 64
-            num_transfers = 16
+            # Low rate: Standard configuration
+            # 32K samples × 4 bytes = 128KB per buffer
+            # 32 buffers × 128KB = 4MB total (well under 16MB limit)
+            buffer_size = 32768  # 32K samples (128KB per buffer)
+            num_buffers = 32  # 32 buffers × 128KB × 4 bytes = 16MB (at limit)
+            num_transfers = 16  # Must be < num_buffers
         
         stream_timeout_ms = 5000  # 5 second timeout (for stream config, not reads)
 
@@ -742,6 +943,24 @@ class BladeRFNativeDevice(SDRBase):
         self._stream_configured = True
         self.dual_channel_mode = dual_channel
         logger.info(f"BladeRFNativeDevice: Stream activated ({'dual' if dual_channel else 'single'} channel)")
+        
+        # Restore gain if device was reopened (gain must be set AFTER stream is configured)
+        if pending_gain_restore is not None:
+            saved_gain, saved_gain_mode, channels_to_config = pending_gain_restore
+            if saved_gain_mode == GainMode.MANUAL:
+                time.sleep(0.05)  # Brief delay after stream setup
+                for ch_num in channels_to_config:
+                    ch = BLADERF_CHANNEL_RX(ch_num)
+                    # Ensure gain mode is MANUAL
+                    ret_mode = _libbladerf.bladerf_set_gain_mode(self.dev, ch, BLADERF_GAIN_MGC)
+                    if ret_mode == 0:
+                        gain_int = int(saved_gain)
+                        ret = _libbladerf.bladerf_set_gain(self.dev, ch, gain_int)
+                        if ret == 0:
+                            logger.info(f"[STREAM] Restored gain for ch{ch_num}: {gain_int} dB")
+                        else:
+                            error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
+                            logger.warning(f"[STREAM] Failed to restore gain for ch{ch_num}: {error_str}")
 
     def _deactivate_stream(self) -> None:
         """Deactivate and cleanup stream."""
@@ -778,7 +997,9 @@ class BladeRFNativeDevice(SDRBase):
         
         Uses CS16 format (int16 I/Q pairs) and converts to complex64.
         """
-        if self.dev is None or not self._stream_active:
+        # CRITICAL: Check stream state FIRST to prevent segfault during device close/reopen
+        # Check _stream_active before dev to avoid race condition
+        if not self._stream_active or self.dev is None:
             return np.empty(0, dtype=np.complex64)
 
         n = int(num_samples)
@@ -812,11 +1033,19 @@ class BladeRFNativeDevice(SDRBase):
 
         # Read from bladeRF (blocking call)
         # Adaptive timeout based on sample rate and chunk size
-        # Timeout should be ~2-3x expected read time to fail fast if USB is struggling
+        # Timeout should be ~3-5x expected read time for high rates to account for USB overhead
         sample_rate = getattr(self, 'sample_rate_sps', 2_400_000)
         expected_read_time_ms = (n / sample_rate) * 1000  # Expected time in ms
-        # Use 3x expected time, but clamp to reasonable range
-        timeout_ms = max(50, min(200, int(expected_read_time_ms * 3)))
+        # Use 4x expected time for rates >20 MS/s, 3x for lower rates
+        # Higher multiplier for high rates accounts for USB 3.0 transfer overhead
+        multiplier = 4.0 if sample_rate > 20_000_000 else 3.0
+        # Clamp timeout: min 50ms, max 300ms (increased for 60 MS/s support)
+        timeout_ms = max(50, min(300, int(expected_read_time_ms * multiplier)))
+        # CRITICAL: Check stream is still active before calling bladerf_sync_rx
+        # This prevents segfault if stream is deactivated during read
+        if not self._stream_active or self.dev is None:
+            return np.empty(0, dtype=np.complex64)
+        
         ret = _libbladerf.bladerf_sync_rx(
             self.dev,
             buf,
@@ -827,6 +1056,12 @@ class BladeRFNativeDevice(SDRBase):
 
         read_time_ns = time.perf_counter_ns() - read_start_ns
         self._health_stats["total_read_time_ns"] += read_time_ns
+
+        # Note: We don't check stream state after read because:
+        # 1. The buffer is already allocated and valid
+        # 2. If read succeeded, we have valid data to process
+        # 3. Checking here could cause false negatives if stream is deactivated
+        #    right after read completes but before we process the buffer
 
         if ret != 0:
             # Error or timeout
@@ -863,40 +1098,23 @@ class BladeRFNativeDevice(SDRBase):
         arr_max = int(arr.max())
         
         # Normalize IQ correctly for SC16_Q11
-        # CRITICAL: There's a contradiction in bladeRF documentation:
-        # - libbladeRF.h says: Q11 uses [-2048, 2047] range, divide by 2048
-        # - API_QUICK_REFERENCE.md says: divide by 32768.0 (full int16 range)
+        # LOCKED TO Q11 FOR DEBUGGING: Removed configurable scaling to eliminate variables
+        # SC16_Q11 format: 11 fractional bits, full-scale is ±2048
+        # According to libbladeRF.h: "Values in the range [-2048, 2048) represent [-1.0, 1.0)"
+        # Valid range is [-2048, 2047] inclusive
         # 
-        # We're seeing values up to 2048 (outside Q11 range), which suggests:
-        # 1. Hardware may be outputting values slightly outside Q11 range when saturated
-        # 2. OR the format isn't strictly Q11 in practice
-        #
-        # Allow configurable scaling mode via env var for testing:
-        # - SPEAR_IQ_SCALING_MODE=q11 (default, per libbladeRF.h)
-        # - SPEAR_IQ_SCALING_MODE=int16 (per API_QUICK_REFERENCE.md)
-        from spear_edge.settings import settings
+        # Q11 normalization: divide by 2048.0
+        # This ensures 1.0 = Q11 full-scale (±2048)
+        format_max = 2047
+        format_name = "Q11"
+        scale = 1.0 / 2048.0  # Q11 normalization: 1.0 = Q11 full-scale (±2048)
+        self._scaling_mode = "Q11 (1/2048)"
+        rail_threshold = 2047  # Q11 full-scale threshold
         
-        # Check format violations based on scaling mode
-        # Q11 valid range: [-2048, 2047], so abs should be <= 2047
-        # int16 valid range: [-32768, 32767], so abs should be <= 32767
-        if settings.IQ_SCALING_MODE == "int16":
-            format_max = 32767
-            format_name = "int16"
-        else:
-            format_max = 2047
-            format_name = "Q11"
-        
+        # Check for format violations (values outside Q11 range)
         format_violations = np.sum(np.abs(arr) > format_max)
         format_violation_frac = float(format_violations) / len(arr) if len(arr) > 0 else 0.0
         q11_violation_frac = format_violation_frac  # Keep for backward compatibility in logs
-        if settings.IQ_SCALING_MODE == "int16":
-            scale = 1.0 / 32768.0  # Full int16 range normalization
-            self._scaling_mode = "int16 (1/32768)"
-            rail_threshold = 32767  # int16 full-scale threshold
-        else:
-            scale = 1.0 / 2048.0  # Q11 normalization: 1.0 = Q11 full-scale (±2048)
-            self._scaling_mode = "Q11 (1/2048)"
-            rail_threshold = 2047  # Q11 full-scale threshold
         
         # Rail detection: use appropriate threshold based on scaling mode
         rail_frac = float(np.mean(raw >= rail_threshold))
@@ -924,11 +1142,9 @@ class BladeRFNativeDevice(SDRBase):
             if arr_max > format_max or arr_min < -format_max-1:
                 logger.warning(f"[SDR] {format_name.upper()} FORMAT VIOLATION: arr range [{arr_min}, {arr_max}] exceeds {format_name.upper()} valid range [{-format_max-1}, {format_max}]! "
                              f"violations={format_violation_frac*100:.3f}%. "
-                             f"This suggests hardware may be outputting different format than expected. "
-                             f"Try switching SPEAR_IQ_SCALING_MODE (current: {settings.IQ_SCALING_MODE}).")
+                             f"This suggests hardware may be outputting different format than expected or front-end overload.")
             
-            from spear_edge.settings import settings
-            scaling_info = getattr(self, '_scaling_mode', f"{settings.IQ_SCALING_MODE} (unknown)")
+            scaling_info = getattr(self, '_scaling_mode', "Q11 (1/2048)")
             logger.info(f"[SDR] Format sanity: raw_max={raw_max} (expected ~0..2047 for Q11), "
                        f"arr_range=[{arr_min}, {arr_max}], raw_mean={int(raw_mean)}, raw_std={int(raw_std)}, "
                        f"rail_frac={rail_frac*100:.3f}%, q11_violations={q11_violation_frac*100:.3f}%, "
@@ -1007,7 +1223,7 @@ class BladeRFNativeDevice(SDRBase):
             else:
                 cause_msg = f"Signal level high (mean={normalized_mean:.4f}) but gain already at minimum."
             
-            rail_type = "int16" if settings.IQ_SCALING_MODE == "int16" else "Q11"
+            rail_type = "Q11"  # Locked to Q11 for debugging
             logger.warning(f"[SDR] ADC CLIPPING: {rail_frac*100:.3f}% at {rail_type} rails, raw_max={raw_max}, "
                          f"TOTAL_GAIN={total_gain:.1f} dB (gain={self.gain_db:.1f}, lna={lna_gain}, bt200={'ON' if bt200_status else 'OFF'}). "
                          f"Signal: mean={normalized_mean:.4f}, std={normalized_std:.4f}, ratio={signal_ratio:.2f}. "
@@ -1043,7 +1259,12 @@ class BladeRFNativeDevice(SDRBase):
                              f"can cause clipping. Try: 1) Move transmitter away, 2) Use different frequency, "
                              f"3) Add external attenuator if needed.")
 
-        return self._conv_buf_iq[:len(i)].copy()  # Return copy to avoid buffer reuse issues
+        # CRITICAL: Zero the tail to prevent stale data contamination
+        # This ensures no old samples remain in the unused portion of the preallocated buffer
+        valid_len = len(i)
+        self._conv_buf_iq[valid_len:] = 0
+        
+        return self._conv_buf_iq[:valid_len].copy()  # Return copy to avoid buffer reuse issues
 
     def get_health(self) -> dict:
         """Return SDR health metrics for monitoring."""

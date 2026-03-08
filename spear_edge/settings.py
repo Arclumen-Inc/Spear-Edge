@@ -23,5 +23,12 @@ class Settings(BaseModel):
     # "int16" = use 1/32768.0 scaling (full int16 range, matches SDR++ behavior)
     # Default: "int16" (matches SDR++ and produces correct noise floor levels)
     IQ_SCALING_MODE: str = os.getenv("SPEAR_IQ_SCALING_MODE", "int16").lower()
+    
+    # DC Removal (for wideband signals like FPV VTX)
+    # False = disabled (recommended for wideband signals to avoid distortion)
+    # True = enabled (subtract block mean, can distort wideband signals near DC)
+    # Default: False (disabled) to preserve wideband signal structure
+    # Set via env var: SPEAR_DC_REMOVAL=true
+    DC_REMOVAL: bool = os.getenv("SPEAR_DC_REMOVAL", "false").lower() in ("true", "1", "yes")
 
 settings = Settings()

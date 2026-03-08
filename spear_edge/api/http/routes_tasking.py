@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
@@ -50,6 +51,10 @@ class SdrConfigRequest(BaseModel):
 # Router binding
 # -------------------------------------------------
 
+# CRITICAL: Serialize SDR config requests to prevent concurrent reconfigurations
+# This prevents race conditions when multiple config changes arrive simultaneously
+_config_lock = asyncio.Lock()
+
 def bind(orchestrator) -> APIRouter:
     router = APIRouter(prefix="/live", tags=["live"])
     
@@ -81,6 +86,19 @@ def bind(orchestrator) -> APIRouter:
         print("[LIVE] Scan started successfully")
     
         return {"ok": True}
+
+    @router.post("/smoothing")
+    async def set_smoothing(req: Dict[str, Any]):
+        """
+        Set FFT smoothing alpha value (0.0 to 1.0).
+        Lower values = more smoothing (good for narrowband), higher values = less smoothing (good for wideband).
+        Default: 0.1 (good for wideband signals like VTX).
+        """
+        alpha = req.get("alpha", 0.1)
+        # Clamp to valid range
+        alpha = max(0.0, min(1.0, float(alpha)))
+        await orchestrator.set_fft_smoothing(alpha)
+        return {"ok": True, "alpha": alpha}
 
     # -------------------------------------------------
     # Helpers
@@ -229,63 +247,67 @@ def bind(orchestrator) -> APIRouter:
             - If ONLY gain changed: apply gain live (no restart)
             - Else: restart scan via orchestrator (single owner)
         - If scan not running: apply config once via sdr.apply_config()
+        
+        CRITICAL: Serialized with _config_lock to prevent concurrent reconfigurations
         """
-        if getattr(orchestrator, "mode", None) == "tasked":
-            return {"ok": False, "error": "SDR locked in TASKED mode"}
+        # Serialize all config requests to prevent race conditions
+        async with _config_lock:
+            if getattr(orchestrator, "mode", None) == "tasked":
+                return {"ok": False, "error": "SDR locked in TASKED mode"}
 
-        new_cfg = _build_cfg(req)
-        prev_cfg = getattr(orchestrator, "sdr_config", None)
-        scan_running = _get_scan_running()
+            new_cfg = _build_cfg(req)
+            prev_cfg = getattr(orchestrator, "sdr_config", None)
+            scan_running = _get_scan_running()
 
-        # Determine whether ONLY gain changed
-        only_gain_changed = False
-        if prev_cfg is not None:
-            try:
-                only_gain_changed = (
-                    new_cfg.center_freq_hz == prev_cfg.center_freq_hz
-                    and new_cfg.sample_rate_sps == prev_cfg.sample_rate_sps
-                    and new_cfg.rx_channel == prev_cfg.rx_channel
-                    and new_cfg.bandwidth_hz == prev_cfg.bandwidth_hz
-                    and new_cfg.gain_mode == prev_cfg.gain_mode
-                    and float(new_cfg.gain_db) != float(prev_cfg.gain_db)
+            # Determine whether ONLY gain changed
+            only_gain_changed = False
+            if prev_cfg is not None:
+                try:
+                    only_gain_changed = (
+                        new_cfg.center_freq_hz == prev_cfg.center_freq_hz
+                        and new_cfg.sample_rate_sps == prev_cfg.sample_rate_sps
+                        and new_cfg.rx_channel == prev_cfg.rx_channel
+                        and new_cfg.bandwidth_hz == prev_cfg.bandwidth_hz
+                        and new_cfg.gain_mode == prev_cfg.gain_mode
+                        and float(new_cfg.gain_db) != float(prev_cfg.gain_db)
+                    )
+                except Exception:
+                    only_gain_changed = False
+
+            # Store config so /sdr/info reflects "what we want"
+            orchestrator.sdr_config = new_cfg
+
+            # If scanning and only gain changed -> apply gain live
+            if scan_running and only_gain_changed:
+                err = _safe_apply_gain_only(new_cfg)
+                if err:
+                    return {"ok": False, "error": "gain_update_failed", "detail": err}
+                return {"ok": True, "config": new_cfg.__dict__, "note": "gain updated live"}
+
+            # If scanning and tuning/rate changed -> restart scan cleanly
+            if scan_running and not only_gain_changed:
+                # Keep current FFT params if possible
+                st = orchestrator.status()
+                # Use current FFT size/FPS from status, or fallback to defaults
+                # Default to 4096 (new default) instead of 1024 (old USB overflow workaround)
+                fft_size = int(st.get("fft_size") or 4096)
+                fps = float(st.get("fps") or 15.0)
+
+                await orchestrator.start_scan(
+                    center_freq_hz=new_cfg.center_freq_hz,
+                    sample_rate_sps=new_cfg.sample_rate_sps,
+                    fft_size=fft_size,
+                    fps=fps,
                 )
-            except Exception:
-                only_gain_changed = False
+                return {"ok": True, "config": new_cfg.__dict__, "note": "scan restarted with new tuning"}
 
-        # Store config so /sdr/info reflects "what we want"
-        orchestrator.sdr_config = new_cfg
+            # Not scanning -> apply config once, no extra tune calls
+            try:
+                orchestrator.sdr.apply_config(new_cfg)
+            except Exception as e:
+                return {"ok": False, "error": "apply_config_failed", "detail": str(e)}
 
-        # If scanning and only gain changed -> apply gain live
-        if scan_running and only_gain_changed:
-            err = _safe_apply_gain_only(new_cfg)
-            if err:
-                return {"ok": False, "error": "gain_update_failed", "detail": err}
-            return {"ok": True, "config": new_cfg.__dict__, "note": "gain updated live"}
-
-        # If scanning and tuning/rate changed -> restart scan cleanly
-        if scan_running and not only_gain_changed:
-            # Keep current FFT params if possible
-            st = orchestrator.status()
-            # Use current FFT size/FPS from status, or fallback to defaults
-            # Default to 4096 (new default) instead of 1024 (old USB overflow workaround)
-            fft_size = int(st.get("fft_size") or 4096)
-            fps = float(st.get("fps") or 15.0)
-
-            await orchestrator.start_scan(
-                center_freq_hz=new_cfg.center_freq_hz,
-                sample_rate_sps=new_cfg.sample_rate_sps,
-                fft_size=fft_size,
-                fps=fps,
-            )
-            return {"ok": True, "config": new_cfg.__dict__, "note": "scan restarted with new tuning"}
-
-        # Not scanning -> apply config once, no extra tune calls
-        try:
-            orchestrator.sdr.apply_config(new_cfg)
-        except Exception as e:
-            return {"ok": False, "error": "apply_config_failed", "detail": str(e)}
-
-        return {"ok": True, "config": new_cfg.__dict__}
+            return {"ok": True, "config": new_cfg.__dict__}
 
     # -------------------------------------------------
     # SDR info (READ ONLY) — MUST NEVER THROW

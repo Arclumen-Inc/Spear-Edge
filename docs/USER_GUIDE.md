@@ -224,10 +224,15 @@ curl -X POST http://localhost:8080/api/capture/label \
 
 ### No Signal Visible
 
-1. Check gain settings (may be too low)
-2. Verify frequency range (signal may be outside range)
-3. Check antenna connection
-4. Verify sample rate (may be too low for signal bandwidth)
+1. **CRITICAL: Verify frequency is correct** (if using version before fix)
+   - Check backend logs for "RX0 configured: req_fc=... act_fc=..."
+   - If `act_fc` differs significantly from `req_fc`, frequency tuning may be incorrect
+   - Update to latest version to fix frequency tuning bug for signals above 4.29 GHz
+2. Check gain settings (may be too low)
+3. Verify frequency range (signal may be outside range)
+4. Check antenna connection
+5. Verify sample rate (may be too low for signal bandwidth)
+6. For wideband signals (VTX): Check antenna polarization (RHCP vs. linear)
 
 ### Capture Fails
 

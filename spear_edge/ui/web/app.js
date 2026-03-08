@@ -70,6 +70,7 @@ const bandwidthInput    = document.getElementById("bandwidthInput");
 const fpsSelect         = document.getElementById("fpsSelect");       // FPS
 
 const sdrDriverEl       = document.getElementById("sdr-driver");
+const sdrRxPortEl       = document.getElementById("sdr-rx-port");
 const sdrCenterEl       = document.getElementById("sdr-center");
 const sdrRateEl         = document.getElementById("sdr-rate");
 const sdrGainEl         = document.getElementById("sdr-gain");
@@ -510,6 +511,9 @@ function readSdrForm() {
   };
 }
 
+// Debounce timer for SDR config changes (frequency, sample rate, bandwidth)
+let sdrConfigDebounceTimer = null;
+
 async function applySdrConfig() {
   if (edgeMode === "tasked") return;
   const cfg = readSdrForm();
@@ -532,6 +536,23 @@ async function applySdrConfig() {
   }
   refreshStatus();
   pollSdrInfo();
+}
+
+// Debounced version of applySdrConfig for input field changes
+function applySdrConfigDebounced() {
+  // Clear existing debounce timer
+  if (sdrConfigDebounceTimer) {
+    clearTimeout(sdrConfigDebounceTimer);
+  }
+  
+  // Debounce: Wait 300ms after last input change before applying
+  // This prevents rapid API calls when user is typing or changing values
+  sdrConfigDebounceTimer = setTimeout(() => {
+    if (edgeMode !== "tasked") {
+      applySdrConfig();
+    }
+    sdrConfigDebounceTimer = null;
+  }, 300); // 300ms debounce delay
 }
 
 async function startManualCapture() {
@@ -755,9 +776,16 @@ function drawSpectrum(frame) {
   const fftH = Math.floor(h * FFT_HEIGHT_FRAC);
   const wfH = h - fftH;
 
-  // Use instantaneous for FFT line so bursts show up (ELRS, FHSS, etc.)
-  // Instant for waterfall as well
-  const fftArr = frame.power_inst_dbfs || frame.power_dbfs;
+  // For wideband signals, use smoothed power for FFT line (better visibility)
+  // For narrowband/bursty signals, use instant power (shows bursts)
+  // Detect wideband by checking if noise floor is very low (< -75 dBFS) or signal spans many bins
+  const noiseFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : null;
+  const tempArr = frame.power_inst_dbfs || frame.power_dbfs || [];
+  const signalSpan = tempArr.length > 0 ? (Math.max(...tempArr) - (noiseFloor !== null ? noiseFloor : Math.min(...tempArr))) : 0;
+  const isWideband = noiseFloor !== null && noiseFloor < -75.0;  // Low noise floor indicates wideband signal
+  
+  // Use smoothed for wideband (better for analog video), instant for narrowband (better for bursts)
+  const fftArr = (isWideband && frame.power_dbfs) ? frame.power_dbfs : (frame.power_inst_dbfs || frame.power_dbfs);
   const wfArr = frame.power_inst_dbfs || frame.power_dbfs;  // instant (for waterfall)
   
   // Store diagnostic data for logging after display range is calculated
@@ -953,7 +981,8 @@ function drawSpectrum(frame) {
   // ---------
   
   // USE BACKEND NOISE FLOOR (more stable and accurate)
-  // Backend uses 10th percentile of averaged spectrum, excluding edge bins
+  // Backend uses adaptive percentile: 2nd percentile for wideband signals, 10th percentile for narrowband
+  // This excludes signal energy from noise floor calculation for wideband signals
   // This is more accurate than frontend recalculation
   const backendFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : null;
   
@@ -976,11 +1005,22 @@ function drawSpectrum(frame) {
 
   // Smoothed floor with asymmetrical attack/release
   // Rises faster (attack) when floor increases, falls slowly (release) when floor decreases
+  // CRITICAL: If noise floor changes significantly (>15 dB), reset immediately (wideband signal detected)
+  // This prevents slow adaptation when backend switches from contaminated to true noise floor
+  // Lowered threshold from 20 dB to 15 dB to catch the -67.8 to -87.0 dBFS transition
   if (fftFloorSmoothed == null) {
     fftFloorSmoothed = floorNow;
   } else {
-    const alpha = (floorNow > fftFloorSmoothed) ? FFT_RISE_ALPHA : FFT_FALL_ALPHA;
-    fftFloorSmoothed = (1 - alpha) * fftFloorSmoothed + alpha * floorNow;
+    const floorDelta = Math.abs(floorNow - fftFloorSmoothed);
+    if (floorDelta > 15.0) {
+      // Large change detected: likely wideband signal or noise floor fix applied
+      // Reset immediately to new value
+      console.log(`[FFT UI] Noise floor reset: ${fftFloorSmoothed.toFixed(1)} → ${floorNow.toFixed(1)} dBFS (delta: ${floorDelta.toFixed(1)} dB)`);
+      fftFloorSmoothed = floorNow;
+    } else {
+      const alpha = (floorNow > fftFloorSmoothed) ? FFT_RISE_ALPHA : FFT_FALL_ALPHA;
+      fftFloorSmoothed = (1 - alpha) * fftFloorSmoothed + alpha * floorNow;
+    }
   }
 
   // Fixed reference level display (absolute dBFS values)
@@ -1000,7 +1040,7 @@ function drawSpectrum(frame) {
 
   // Calculate display range with fixed reference level at top
   // If noise floor is very low, extend range downward (but keep reference level fixed)
-  const dbMin = fftDbMinSmoothed;
+  let dbMin = fftDbMinSmoothed;
   let dbMax = dbMin + FFT_VIEW_RANGE_DB;  // Default: fixed span from noise floor
   
   // If calculated max exceeds reference level, use reference level and extend downward
@@ -1015,6 +1055,29 @@ function drawSpectrum(frame) {
   } else {
     // Noise floor is high enough that we can use full range below reference level
     // Keep the calculated range
+  }
+  
+  // WIDEBAND SIGNAL OPTIMIZATION: Use fixed 45 dB range for wideband signals
+  // Wideband signals have low peak-to-noise ratio, so a 70 dB range compresses them too much
+  // When noise floor is very low (< -75 dBFS), it indicates wideband signal is present
+  // Use a fixed 45 dB range from noise floor for stable, consistent display
+  let widebandOptimizationApplied = false;
+  if (fftFloorSmoothed !== null && fftFloorSmoothed < -75.0) {
+    // Very low noise floor indicates wideband signal (true noise is low, signal spreads power)
+    // Use fixed 45 dB range from noise floor for stability
+    const widebandRangeDb = 45.0;  // Fixed 45 dB range for wideband signals
+    
+    const newDbMax = Math.min(FFT_REFERENCE_LEVEL_DBFS, fftFloorSmoothed + widebandRangeDb);
+    const newDbMin = fftFloorSmoothed;
+    
+    // Only apply if current range is much larger (prevents constant adjustment)
+    const currentRange = dbMax - dbMin;
+    if (currentRange > 50.0 && newDbMax > newDbMin) {
+      // Set fixed range for stable display
+      dbMin = newDbMin;
+      dbMax = newDbMax;
+      widebandOptimizationApplied = true;
+    }
   }
   
   // Final display range (absolute dBFS values - labels will show these exact values)
@@ -1035,7 +1098,14 @@ function drawSpectrum(frame) {
     // dbMin and dbMax are now defined above
     const displayDbMin = typeof dbMin !== 'undefined' ? dbMin : diagnosticData.frontendFloorRaw;
     const displayDbMax = typeof dbMax !== 'undefined' ? dbMax : (displayDbMin + FFT_VIEW_RANGE_DB);
+    const peakInRange = diagnosticData.fftMax >= displayDbMin && diagnosticData.fftMax <= displayDbMax;
+    const peakPositionPct = peakInRange ? ((diagnosticData.fftMax - displayDbMin) / (displayDbMax - displayDbMin) * 100) : null;
+    
     console.log(`[FFT UI] Display Range: ${displayDbMin.toFixed(1)} to ${displayDbMax.toFixed(1)} dBFS (span: ${(displayDbMax - displayDbMin).toFixed(1)} dB)`);
+    console.log(`[FFT UI] Peak: ${diagnosticData.fftMax.toFixed(1)} dBFS, ` +
+               `in range: ${peakInRange}, ` +
+               `position: ${peakPositionPct !== null ? peakPositionPct.toFixed(1) + '%' : 'N/A'}, ` +
+               `wideband optimization: ${typeof widebandOptimizationApplied !== 'undefined' ? widebandOptimizationApplied : 'N/A'}`);
     window._lastFftDiag = Date.now();
   }
   
@@ -1087,22 +1157,43 @@ function drawSpectrum(frame) {
   
   // Downsample for display if FFT size is very large (performance optimization)
   // Keep max 4096 points for rendering (canvas width is typically much smaller anyway)
+  // For wideband signals, use mean instead of max to show signal energy better
   const MAX_DISPLAY_POINTS = 4096;
   const downsample = dbNow.length > MAX_DISPLAY_POINTS;
   const downsampleStep = downsample ? Math.ceil(dbNow.length / MAX_DISPLAY_POINTS) : 1;
   const displayLength = downsample ? Math.floor(dbNow.length / downsampleStep) : dbNow.length;
   
-  // Downsample the current frame for display (take max value in each bin to preserve peaks)
+  // Downsample the current frame for display
+  // For wideband signals: use mean to show signal energy (wideband spreads power across bins)
+  // For narrowband signals: use max to preserve peaks (narrowband has sharp peaks)
   const dbNowDisplay = [];
   if (downsample) {
     for (let i = 0; i < displayLength; i++) {
       const startIdx = i * downsampleStep;
       const endIdx = Math.min(startIdx + downsampleStep, dbNow.length);
-      let maxVal = dbNow[startIdx];
-      for (let j = startIdx + 1; j < endIdx; j++) {
-        if (dbNow[j] > maxVal) maxVal = dbNow[j];
+      
+      if (isWideband) {
+        // Wideband: use mean to show signal energy (power is spread across bins)
+        let sum = 0;
+        for (let j = startIdx; j < endIdx; j++) {
+          sum += dbNow[j];
+        }
+        dbNowDisplay.push(sum / (endIdx - startIdx));
+      } else {
+        // Narrowband: use max to preserve peaks
+        let maxVal = dbNow[startIdx];
+        for (let j = startIdx + 1; j < endIdx; j++) {
+          if (dbNow[j] > maxVal) maxVal = dbNow[j];
+        }
+        dbNowDisplay.push(maxVal);
       }
-      dbNowDisplay.push(maxVal);
+    }
+    
+    // Log downsampling info (throttled)
+    if (!window._lastDownsampleLog || (Date.now() - window._lastDownsampleLog) > 2000) {
+      console.log(`[FFT UI] Downsampling: ${dbNow.length} -> ${displayLength} points, ` +
+                 `step=${downsampleStep}, method=${isWideband ? 'mean (wideband)' : 'max (narrowband)'}`);
+      window._lastDownsampleLog = Date.now();
     }
   } else {
     dbNowDisplay.push(...dbNow);
@@ -1311,6 +1402,24 @@ function startFftWs() {
       // 2) Binary frames
       const frame = parseBinarySpectrumFrame(ev.data);
       if (frame) {
+        // Log received frame data for debugging (throttled to every 2 seconds)
+        if (!window._lastFrameLog || (Date.now() - window._lastFrameLog) > 2000) {
+          const fftSize = frame.power_dbfs ? frame.power_dbfs.length : (frame.power_inst_dbfs ? frame.power_inst_dbfs.length : 0);
+          const hasInst = !!frame.power_inst_dbfs;
+          const noiseFloor = frame.noise_floor_dbfs !== undefined ? frame.noise_floor_dbfs : null;
+          
+          if (fftSize > 0) {
+            const arr = frame.power_inst_dbfs || frame.power_dbfs || [];
+            const min = Math.min(...arr);
+            const max = Math.max(...arr);
+            const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+            
+            console.log(`[FFT WS] Frame received: size=${fftSize}, has_inst=${hasInst}, ` +
+                       `range=[${min.toFixed(1)}, ${max.toFixed(1)}] dBFS, mean=${mean.toFixed(1)} dBFS, ` +
+                       `noise_floor=${noiseFloor !== null ? noiseFloor.toFixed(1) : 'N/A'} dBFS`);
+          }
+          window._lastFrameLog = Date.now();
+        }
         drawSpectrum(frame);
       }
     } catch (e) {
@@ -1556,6 +1665,9 @@ function updateSdrStatus(info) {
   const device = info?.device || {};
   const cfg = info?.current_config || {};
   if (sdrDriverEl) sdrDriverEl.textContent = device.driver || info.driver || "Unknown SDR";
+  // RX port: prefer device.active_rx_channel (actual hardware state), fallback to cfg.rx_channel
+  const rxChannel = device.active_rx_channel !== undefined ? device.active_rx_channel : (cfg.rx_channel !== undefined ? cfg.rx_channel : null);
+  if (sdrRxPortEl) sdrRxPortEl.textContent = rxChannel !== null ? `RX${rxChannel}` : "—";
   if (sdrCenterEl) sdrCenterEl.textContent = cfg.center_freq_hz ? (cfg.center_freq_hz / 1e6).toFixed(3) + " MHz" : "—";
   if (sdrRateEl) sdrRateEl.textContent = cfg.sample_rate_sps ? (cfg.sample_rate_sps / 1e6).toFixed(2) + " MS/s" : "—";
   if (sdrGainEl) sdrGainEl.textContent = (cfg.gain_db !== undefined) ? (cfg.gain_db + " dB") : "—";
@@ -2990,23 +3102,51 @@ function init() {
   if (btnApplySdr) btnApplySdr.addEventListener("click", applySdrConfig);
   if (btnManualCapture) btnManualCapture.addEventListener("click", startManualCapture);
   if (gainModeSelect) gainModeSelect.addEventListener("change", updateGainUiLock);
+  
+  // Add debouncing for frequency, sample rate, and bandwidth inputs
+  // This prevents rapid API calls when user is typing or changing values
+  if (freqInput) {
+    freqInput.addEventListener("input", applySdrConfigDebounced);
+    freqInput.addEventListener("change", applySdrConfigDebounced);
+  }
+  if (rateInput) {
+    rateInput.addEventListener("input", applySdrConfigDebounced);
+    rateInput.addEventListener("change", applySdrConfigDebounced);
+  }
+  if (bandwidthInput) {
+    bandwidthInput.addEventListener("input", applySdrConfigDebounced);
+    bandwidthInput.addEventListener("change", applySdrConfigDebounced);
+  }
   if (btnManual) btnManual.addEventListener("click", () => apiSetEdgeMode("manual"));
   if (btnArmed) btnArmed.addEventListener("click", () => apiSetEdgeMode("armed"));
   
   if (btnSetL4tbr0) btnSetL4tbr0.addEventListener("click", () => setNetworkInterface("l4tbr0"));
   if (btnSetEth0) btnSetEth0.addEventListener("click", () => setNetworkInterface("eth0"));
   
-  // Gain slider
+  // Gain slider with debouncing for smooth updates
+  let gainDebounceTimer = null;
   if (gainSlider) {
     gainSlider.addEventListener("input", (e) => {
       const value = parseInt(e.target.value);
+      // Update display immediately for smooth UI feedback
       if (gainValue) {
         gainValue.textContent = value;
       }
-      // Auto-apply gain change if scan is running
-      if (edgeMode !== "tasked") {
-        applySdrConfig();
+      
+      // Clear existing debounce timer
+      if (gainDebounceTimer) {
+        clearTimeout(gainDebounceTimer);
       }
+      
+      // Debounce: Wait 200ms after last slider movement before applying
+      // This prevents rapid API calls and segfaults from too many concurrent gain changes
+      gainDebounceTimer = setTimeout(() => {
+        // Auto-apply gain change if scan is running
+        if (edgeMode !== "tasked") {
+          applySdrConfig();
+        }
+        gainDebounceTimer = null;
+      }, 200); // 200ms debounce delay
     });
   }
   
@@ -3054,6 +3194,49 @@ function init() {
       if (!timeMarkersEnabled) {
         waterfallTimestamps = [];  // Clear timestamps when disabled
       }
+    });
+  }
+
+  // FFT Smoothing control
+  const smoothingSlider = document.getElementById("smoothingSlider");
+  const smoothingValue = document.getElementById("smoothingValue");
+  let smoothingTimeout;
+  
+  if (smoothingSlider && smoothingValue) {
+    // Convert slider value (0-100) to alpha (0.0-1.0)
+    // Slider value 0 = alpha 0.0 (no smoothing), 100 = alpha 1.0 (full smoothing)
+    // Actually, we want: slider 0 = alpha 0.01 (heavy), slider 100 = alpha 1.0 (none)
+    // So: alpha = 0.01 + (slider / 100) * 0.99
+    function sliderToAlpha(sliderVal) {
+      return 0.01 + (sliderVal / 100) * 0.99;
+    }
+    
+    function alphaToSlider(alpha) {
+      return Math.round(((alpha - 0.01) / 0.99) * 100);
+    }
+    
+    smoothingSlider.addEventListener("input", (e) => {
+      const sliderVal = parseInt(e.target.value);
+      const alpha = sliderToAlpha(sliderVal);
+      smoothingValue.textContent = alpha.toFixed(2);
+      
+      // Debounce API call (200ms)
+      clearTimeout(smoothingTimeout);
+      smoothingTimeout = setTimeout(async () => {
+        try {
+          const response = await fetch("/api/live/smoothing", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ alpha: alpha }),
+          });
+          const result = await response.json();
+          if (result.ok) {
+            console.log(`[UI] FFT smoothing set to ${alpha.toFixed(3)}`);
+          }
+        } catch (err) {
+          console.error("[UI] Failed to set smoothing:", err);
+        }
+      }, 200);
     });
   }
 

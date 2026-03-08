@@ -64,9 +64,10 @@ class ScanTask:
         self._avg_db = None
         
         # SDR++-style smoothing parameters
-        # FFT smoothing: 100 = alpha = 1/100 = 0.01 (heavy smoothing for display)
+        # FFT smoothing: Default 0.1 (10x less smoothing than SDR++ default) for better wideband visibility
+        # Lower values = more smoothing (0.01 = heavy, 0.1 = light, 1.0 = no smoothing)
         # SNR smoothing: 20 = alpha = 1/20 = 0.05 (moderate smoothing for SNR)
-        self._fft_smooth_alpha = 0.01  # FFT display smoothing (matches SDR++ smoothing=100)
+        self._fft_smooth_alpha = 0.1  # FFT display smoothing (default: 0.1 for wideband signals, was 0.01)
         self._snr_smooth_alpha = 0.05  # SNR smoothing (matches SDR++ SNR smoothing=20)
         self._fft_smoothed = None  # Smoothed FFT for display
         self._snr_smoothed = None  # Smoothed SNR value
@@ -88,6 +89,23 @@ class ScanTask:
     def subscribe(self, cb: Callable[[Dict[str, Any]], Any]) -> None:
         """Register a callback to receive truth FFT frames."""
         self._subs.append(cb)
+
+    async def set_smoothing(self, alpha: float) -> None:
+        """
+        Set FFT smoothing alpha value (thread-safe).
+        
+        Args:
+            alpha: Smoothing factor (0.0 to 1.0)
+                - 0.01 = heavy smoothing (SDR++ default, good for narrowband)
+                - 0.1 = light smoothing (default, good for wideband signals)
+                - 1.0 = no smoothing (instant display)
+        """
+        # Clamp to valid range
+        alpha = max(0.0, min(1.0, float(alpha)))
+        # Simple assignment is atomic in Python (GIL protects it)
+        self._fft_smooth_alpha = alpha
+        # Reset smoothed state to force immediate update
+        self._fft_smoothed = None
 
     def is_running(self) -> bool:
         return bool(self._running and self._task and not self._task.done())
@@ -174,10 +192,18 @@ class ScanTask:
             else:
                 self._work_iq[:] = iq
 
-            # Remove DC offset before FFT (removes LO leakage and DC bias)
-            # Use in-place operation to avoid allocation
-            dc_offset = np.mean(self._work_iq)
-            self._work_iq -= dc_offset
+            # DC offset removal (configurable via settings)
+            # WARNING: Block-mean subtraction can distort wideband signals, especially if:
+            # - The signal is near DC in the FFT span
+            # - The signal is wideband (20-30 MHz analog video)
+            # - The signal occupies a significant fraction of the displayed band
+            # For wideband signals like FPV VTX, DC removal is disabled by default.
+            # For narrowband signals, DC removal helps reduce LO leakage and DC bias.
+            # If you need DC removal for wideband, tune the LO off-center by 5-10 MHz instead.
+            from spear_edge.settings import settings
+            if settings.DC_REMOVAL:
+                dc_offset = np.mean(self._work_iq)
+                self._work_iq -= dc_offset
 
             # Window and FFT - use pre-allocated arrays
             # Multiply in-place where possible
@@ -207,18 +233,47 @@ class ScanTask:
             exclude_pct = 0.05  # Exclude 5% from each edge
             exclude_count = int(len(self._avg_db) * exclude_pct)
             if exclude_count > 0 and exclude_count < len(self._avg_db) // 2:
-                center_spectrum = self._avg_db[exclude_count:-exclude_count]
-                noise_floor_db = float(np.percentile(center_spectrum, 10))
+                center_spectrum_avg = self._avg_db[exclude_count:-exclude_count]
             else:
                 # Fallback to full spectrum if exclusion would be too aggressive
-                noise_floor_db = float(np.percentile(self._avg_db, 10))
+                center_spectrum_avg = self._avg_db
             
-            # SDR++-style FFT smoothing (smoothing=100, alpha=0.01)
+            # Detect wideband signals using INSTANT spectrum (not averaged)
+            # Averaged spectrum smooths out the signal, making detection less reliable
+            # Use instant spectrum to detect if signal is wideband
+            exclude_count_inst = int(len(spec_db) * exclude_pct)
+            if exclude_count_inst > 0 and exclude_count_inst < len(spec_db) // 2:
+                center_spectrum_inst = spec_db[exclude_count_inst:-exclude_count_inst]
+            else:
+                center_spectrum_inst = spec_db
+            
+            # Detect wideband signals: if >20% of bins are significantly above noise, it's wideband
+            # Use a preliminary noise floor estimate (2nd percentile) to detect signal bins
+            preliminary_floor = float(np.percentile(center_spectrum_inst, 2))
+            signal_threshold = preliminary_floor + 3.0  # Bins 3+ dB above preliminary floor
+            signal_bins = np.sum(center_spectrum_inst > signal_threshold)
+            signal_pct = (signal_bins / len(center_spectrum_inst)) * 100
+            
+            # For wideband signals (>20% of spectrum), use lower percentile to exclude signal energy
+            # For narrowband signals, use 10th percentile (original method)
+            # Use averaged spectrum for final noise floor (more stable), but detection uses instant
+            if signal_pct > 20.0:
+                # Wideband signal detected: use 2nd percentile to get true noise floor
+                # This excludes the signal energy that would contaminate 10th percentile
+                noise_floor_db = float(np.percentile(center_spectrum_avg, 2))
+            else:
+                # Narrowband signal: use 10th percentile (original method works well)
+                noise_floor_db = float(np.percentile(center_spectrum_avg, 10))
+            
+            # SDR++-style FFT smoothing (configurable alpha, default 0.1 for wideband)
             # Smooth the entire spectrum for display (reduces noise variance)
+            # Lower alpha = more smoothing, higher alpha = less smoothing
             if self._fft_smoothed is None or self._fft_smoothed.shape[0] != spec_db.shape[0]:
                 self._fft_smoothed = spec_db.astype(np.float32)
             else:
-                self._fft_smoothed = (self._fft_smooth_alpha * spec_db + (1.0 - self._fft_smooth_alpha) * self._fft_smoothed).astype(np.float32)
+                # Thread-safe smoothing update (alpha can change during runtime)
+                alpha = self._fft_smooth_alpha
+                self._fft_smoothed = (alpha * spec_db + (1.0 - alpha) * self._fft_smoothed).astype(np.float32)
             
             # Calculate SNR (peak - noise floor)
             peak_power_db = float(np.max(spec_db))
@@ -307,17 +362,23 @@ class ScanTask:
                 iq_dc_removed = iq - dc_before
                 dc_after = float(np.mean(iq_dc_removed))
                 
+                # Calculate signal percentage for logging
+                signal_pct_log = (signal_bins / len(power_line)) * 100 if len(power_line) > 0 else 0
+                wideband_detected = signal_pct_log > 20.0
                 print(f"[SCAN] Diagnostics: samples max={sample_mag_max:.6f} mean={sample_mag_mean:.6f} std={sample_mag_std:.6f}, "
                       f"FFT mag max={mag_max:.6e} mean={mag_mean:.6e}, "
                       f"peak={peak_power_db:.1f} dBFS@bin{peak_power_idx}, floor={noise_floor_db:.1f} dBFS (theoretical={theoretical_floor:.1f} dBFS), "
-                      f"range={peak_power_db - noise_floor_db:.1f} dB, SNR={self._snr_smoothed:.1f} dB (smoothed), signal_bins={signal_bins}")
+                      f"range={peak_power_db - noise_floor_db:.1f} dB, SNR={self._snr_smoothed:.1f} dB (smoothed), signal_bins={signal_bins} ({signal_pct_log:.1f}%), "
+                      f"wideband={'YES' if wideband_detected else 'NO'}")
                 print(f"[SCAN] Edge Bin Analysis:")
                 print(f"  Edge bins (first {edge_bin_count}): mean={edge_start_mean:.1f} dBFS, max={edge_start_max:.1f} dBFS")
                 print(f"  Edge bins (last {edge_bin_count}): mean={edge_end_mean:.1f} dBFS, max={edge_end_max:.1f} dBFS")
                 print(f"  Center bins ({len(center_bins)}): mean={center_mean:.1f} dBFS, max={center_max:.1f} dBFS")
                 print(f"  Edge elevation: start={edge_start_mean-center_mean:.1f} dB, end={edge_end_mean-center_mean:.1f} dB")
+                # Determine which percentile was actually used
+                percentile_used = "2nd" if wideband_detected else "10th"
                 print(f"[SCAN] Noise Floor Comparison:")
-                print(f"  Backend (10th pct, averaged): {noise_floor_db:.1f} dBFS")
+                print(f"  Backend ({percentile_used} pct, averaged, wideband={wideband_detected}): {noise_floor_db:.1f} dBFS")
                 print(f"  Frontend equiv (2nd pct, raw): {frontend_floor_equiv:.1f} dBFS")
                 print(f"  Without edge bins (10th pct): {floor_without_edges:.1f} dBFS")
                 print(f"  Difference (with vs without edges): {noise_floor_db - floor_without_edges:.1f} dB")

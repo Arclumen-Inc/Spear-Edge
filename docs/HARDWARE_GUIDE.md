@@ -260,6 +260,24 @@ export SPEAR_CALIBRATION_OFFSET_DB=0.0
 - Set RF parameters before stream activation
 - Follow correct lifecycle order
 
+**"LIBUSB_ERROR_NO_MEM":**
+- USB memory pool exhausted (16MB limit)
+- Too many or too large USB buffers configured
+- Previous stream buffers not freed (memory leak)
+
+**Fix:**
+- System automatically closes/reopens device to free buffers
+- If persistent, reduce sample rate or restart Edge
+- Check USB connection (USB 3.0 required for high rates)
+
+**Segmentation fault when changing sample rate:**
+- Race condition during device close/reopen
+- RX task thread accessing device while being reconfigured
+
+**Fix:**
+- System now handles this automatically with proper synchronization
+- If persistent, restart Edge
+
 ### Gain Issues
 
 **Clipping (samples max out):**
@@ -275,11 +293,18 @@ export SPEAR_CALIBRATION_OFFSET_DB=0.0
 - Gain too low
 - Antenna not connected
 - Wrong frequency
+- **CRITICAL: Frequency tuning bug (fixed in latest version)**
+  - If using version before fix, frequencies above 4.29 GHz were truncated
+  - Example: 5910 MHz → 1615 MHz (completely wrong frequency)
+  - **Solution**: Update to latest version with frequency fix
 
 **Fix:**
 - Increase gain gradually
 - Check antenna connection
 - Verify frequency range
+- **Verify actual frequency**: Check backend logs for "RX0 configured: req_fc=... act_fc=..."
+  - If `act_fc` differs significantly from `req_fc`, frequency tuning may be incorrect
+- For wideband signals (VTX), check antenna polarization (RHCP vs. linear)
 
 ### Performance Issues
 
@@ -300,6 +325,53 @@ export SPEAR_CALIBRATION_OFFSET_DB=0.0
 **Fix:**
 - Reduce sample rate
 - Increase ring buffer size (if possible)
+
+### Wideband Signal Issues (VTX, Analog Video)
+
+**Signal appears flat in FFT/waterfall:**
+- **Noise floor contamination**: Wideband signals (20-30 MHz) can contaminate noise floor calculation
+  - System now uses adaptive noise floor (2nd percentile for wideband, 10th for narrowband)
+- **Heavy smoothing**: FFT smoothing can flatten wideband signals
+  - Reduce smoothing via UI slider (default is now 0.1, was 0.01)
+- **DC removal**: Block-mean DC removal can distort wideband signals
+  - Disabled by default for wideband signals
+  - If needed, tune LO off-center by 5-10 MHz instead
+- **Display range compression**: Autoscaling can compress wideband signals
+  - System now uses fixed 35 dB range for wideband signals
+- **Frequency tuning bug**: If using old version, frequency may be incorrect (see above)
+
+**Fix:**
+- Verify frequency is correct (check backend logs)
+- Reduce FFT smoothing (use UI slider)
+- Ensure DC removal is disabled (default)
+- Check antenna polarization (RHCP vs. linear)
+- For VTX signals, tune slightly off-center (e.g., 5917 MHz VTX → tune to 5925 MHz)
+
+**Signal not visible despite being present:**
+- **Frequency tuning bug (CRITICAL)**: If using version before fix, frequencies above 4.29 GHz were truncated
+  - **Solution**: Update to latest version
+- Antenna polarization mismatch (RHCP TX with linear RX = 3-20 dB loss)
+- Gain too low
+- Sample rate too low for signal bandwidth
+- FFT size too small (wideband signals need larger FFTs to see energy spread)
+
+**Fix:**
+- **First**: Verify frequency is correct (check backend logs for "RX0 configured: req_fc=... act_fc=...")
+- Match antenna polarization (RHCP TX requires RHCP RX)
+- Increase gain gradually
+- Use sample rate ≥ 2× signal bandwidth (e.g., 30 MHz VTX needs ≥ 60 MS/s)
+- Use larger FFT size (8192, 16384, or 32768 for wideband signals)
+
+### Memory Issues
+
+**malloc_consolidate() segfault when adjusting gain:**
+- Race condition from rapid gain slider movements
+- Multiple concurrent calls to `set_gain()` without synchronization
+
+**Fix:**
+- System now has thread-safe gain operations and debounced slider
+- If persistent, move gain slider more slowly
+- Restart Edge if segfault occurs
 
 ## Hardware Specifications
 
