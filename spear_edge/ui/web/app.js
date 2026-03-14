@@ -781,7 +781,13 @@ function drawSpectrum(frame) {
   const cssH = canvas.clientHeight;
   const pxW = canvas.width;
   const pxH = canvas.height;
-  const pxFftH = Math.floor(cssH * FFT_HEIGHT_FRAC * dpr);
+  let pxFftH = Math.floor(cssH * FFT_HEIGHT_FRAC * dpr);
+  // When clientHeight is 0 or tiny, pxFftH becomes 0 and the waterfall scroll copies the whole
+  // canvas (including the FFT line), making the line appear to move down each frame. Use canvas
+  // buffer height so the FFT region is always the top 40% and never zero-height.
+  if (pxFftH <= 0 && pxH > 0) {
+    pxFftH = Math.max(1, Math.floor(pxH * FFT_HEIGHT_FRAC));
+  }
   const pxWfH  = pxH - pxFftH;
 
   // CSS-space for FFT drawing

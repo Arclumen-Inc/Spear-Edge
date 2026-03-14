@@ -48,11 +48,17 @@ class RxTask:
         self._task = asyncio.create_task(self._monitor(), name="rx_task_monitor")
 
     async def stop(self):
+        print("[RX_TASK] stop() called - signaling thread to exit...")
         self._running = False
         self._stop_event.set()
 
         if self._thread:
-            self._thread.join(timeout=2.0)
+            # Thread should exit quickly since SDR stream is deactivated
+            self._thread.join(timeout=1.0)
+            if self._thread.is_alive():
+                print("[RX_TASK] WARNING: Thread still alive after 1s, giving up")
+            else:
+                print("[RX_TASK] Thread joined successfully")
             self._thread = None
 
         if self._task:
@@ -62,6 +68,7 @@ class RxTask:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        print("[RX_TASK] stop() complete")
 
     def _read_thread(self):
         """

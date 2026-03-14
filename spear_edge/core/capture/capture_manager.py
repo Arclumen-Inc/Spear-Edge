@@ -171,19 +171,26 @@ class CaptureManager:
     async def _loop(self) -> None:
         print("[CAPTURE MGR] Worker loop started — waiting for jobs")
         while self._running:
+            got_item = False
             try:
                 print("[CAPTURE MGR] Waiting for next capture job...")
                 req = await self._q.get()
+                got_item = True  # Only set if get() succeeded
                 print(f"[CAPTURE MGR] *** NEW CAPTURE JOB DEQUEUED ***")
                 print(f"[CAPTURE MGR] Freq: {req.freq_hz / 1e6:.3f} MHz | Duration: {req.duration_s}s | Reason: {req.reason}")
 
                 await self._execute(req)
+            except asyncio.CancelledError:
+                print("[CAPTURE MGR] Worker loop cancelled")
+                break
             except Exception as e:
                 print("[CAPTURE MGR] Unexpected error in worker loop:", e)
                 import traceback
                 traceback.print_exc()
             finally:
-                self._q.task_done()
+                # Only call task_done() if we actually got an item
+                if got_item:
+                    self._q.task_done()
 
     # --------------------------------------------------
     # Core capture execution

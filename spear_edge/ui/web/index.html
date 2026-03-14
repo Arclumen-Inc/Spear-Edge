@@ -239,11 +239,11 @@
 
           <label>
             Gain (dB)
-            <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
               <input type="range" id="gainSlider" min="0" max="60" value="0" step="1" style="flex: 1;">
-              <span id="gainValue" style="min-width: 40px; text-align: right; font-family: monospace;">0</span>
+              <span id="gainValue" style="min-width: 30px; text-align: right; font-family: monospace;">0</span>
             </div>
-            <small style="font-size: 10px; color: var(--text-muted);">Main gain: 0-60 dB (lab: 5-15, field: 20-35)</small>
+            <small style="font-size: 9px; color: var(--text-muted); word-wrap: break-word;">0-60 dB (lab: 5-15, field: 20-35)</small>
           </label>
 
           <label>
@@ -258,12 +258,12 @@
           </label>
 
           <label>
-            BT200 External LNA
+            BT200 LNA
             <select id="bt200Select">
               <option value="false" selected>Disabled</option>
               <option value="true">Enabled</option>
             </select>
-            <small style="font-size: 10px; color: var(--text-muted);">Bias-tee powered external LNA</small>
+            <small style="font-size: 9px; color: var(--text-muted); word-wrap: break-word;">Bias-tee external LNA</small>
           </label>
 
           <label>
@@ -279,8 +279,8 @@
           </label>
 
           <div class="btn-row">
-            <button id="btnApplySdr">Apply SDR Settings</button>
-            <button id="btnManualCapture">Manual Capture</button>
+            <button id="btnApplySdr">Apply SDR</button>
+            <button id="btnManualCapture">Capture</button>
           </div>
 
           <div class="small-note">

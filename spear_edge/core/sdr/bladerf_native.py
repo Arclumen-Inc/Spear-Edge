@@ -217,6 +217,10 @@ class BladeRFNativeDevice(SDRBase):
             "total_read_time_ns": 0,
             "start_time": time.time(),
         }
+        
+        # Clipping detection state - avoid false positives during startup
+        self._stream_start_time: float = 0.0
+        self._startup_clipping_warned: bool = False
 
         # Pre-allocated conversion buffers (reuse for performance)
         self._conv_buf_i: Optional[np.ndarray] = None
@@ -942,6 +946,8 @@ class BladeRFNativeDevice(SDRBase):
         self._stream_active = True
         self._stream_configured = True
         self.dual_channel_mode = dual_channel
+        self._stream_start_time = time.time()  # Track for startup grace period
+        self._startup_clipping_warned = False  # Reset startup warning flag
         logger.info(f"BladeRFNativeDevice: Stream activated ({'dual' if dual_channel else 'single'} channel)")
         
         # Restore gain if device was reopened (gain must be set AFTER stream is configured)
@@ -1190,74 +1196,85 @@ class BladeRFNativeDevice(SDRBase):
         fs_frac = float(np.mean(np.abs(iq) >= 0.98))  # Close to Q11 full-scale in float domain
         
         # Warn if clipping detected (now that we have i/q for DC offset calculation)
-        if rail_frac > 0.001:  # More than 0.1% of samples hitting rails
+        # IMPROVED: Raised threshold from 0.1% to 1% to reduce false positives
+        # IMPROVED: Added startup grace period (1.5s) to ignore transient settling
+        # IMPROVED: Better cause detection - low signal ratio indicates noise, not strong signal
+        time_since_stream_start = time.time() - self._stream_start_time if self._stream_start_time > 0 else float('inf')
+        in_startup_period = time_since_stream_start < 1.5  # 1.5 second grace period
+        
+        if rail_frac > 0.01:  # More than 1% of samples hitting rails (raised from 0.1%)
             total_gain = self.gain_db + self.lna_gain_db.get(self.rx_channel, 0) + (20 if self.bt200_enabled.get(self.rx_channel, False) else 0)
             bt200_status = self.bt200_enabled.get(self.rx_channel, False)
             lna_gain = self.lna_gain_db.get(self.rx_channel, 0)
-            
-            # Recommend safe gain range based on clipping severity
-            if rail_frac > 0.05:  # Severe clipping (>5%)
-                recommended_gain = max(0, self.gain_db - 20)  # Reduce by 20 dB
-            elif rail_frac > 0.01:  # Moderate clipping (>1%)
-                recommended_gain = max(0, self.gain_db - 10)  # Reduce by 10 dB
-            else:  # Light clipping (>0.1%)
-                recommended_gain = max(0, self.gain_db - 5)  # Reduce by 5 dB
             
             # Calculate signal statistics
             normalized_mean = float(np.mean(np.abs(iq)))
             normalized_std = float(np.std(np.abs(iq)))
             signal_ratio = normalized_std / max(normalized_mean, 0.001) if normalized_mean > 0.001 else 0.0
             
-            # Determine root cause and provide specific guidance
+            # Determine root cause with improved detection
             cause_msg = ""
             if dc_offset_mag > 0.1:
                 cause_msg = f"LARGE DC OFFSET ({dc_offset_mag:.4f}) - Check LO leakage or hardware issues."
-            elif normalized_mean > 0.3:
-                if signal_ratio < 1.5:
-                    cause_msg = f"VERY STRONG WIDEBAND SIGNAL (mean={normalized_mean:.4f}, ratio={signal_ratio:.2f}) - "
-                    cause_msg += "Even at 0 dB gain, input is too strong. Solutions: 1) Move/disable nearby transmitter, "
-                    cause_msg += "2) Use different frequency, 3) Add external attenuator (10-20 dB)."
-                else:
-                    cause_msg = f"STRONG NARROWBAND SIGNAL (mean={normalized_mean:.4f}, ratio={signal_ratio:.2f}) - "
-                    cause_msg += "Strong signal present. Move transmitter away or use different frequency."
+            elif signal_ratio > 2.0 and normalized_mean > 0.3:
+                # High ratio = strong narrowband signal present
+                cause_msg = f"STRONG NARROWBAND SIGNAL (mean={normalized_mean:.4f}, ratio={signal_ratio:.2f}) - "
+                cause_msg += "Strong signal present. Move transmitter away or use different frequency."
+            elif normalized_mean > 0.6:
+                # Very high mean = actual strong input
+                cause_msg = f"VERY STRONG INPUT (mean={normalized_mean:.4f}) - "
+                cause_msg += "Add external attenuator (10-20 dB) or move away from transmitter."
+            elif rail_frac > 0.05:
+                # Severe clipping warrants warning regardless of signal stats
+                cause_msg = f"SIGNIFICANT CLIPPING ({rail_frac*100:.1f}%) - Check for nearby strong transmitters."
             else:
-                cause_msg = f"Signal level high (mean={normalized_mean:.4f}) but gain already at minimum."
+                # Moderate clipping at low gain - likely just band noise
+                cause_msg = f"Moderate clipping at minimum gain - typical for busy bands (ISM, WiFi, etc.)"
             
-            rail_type = "Q11"  # Locked to Q11 for debugging
+            rail_type = "Q11"
             logger.warning(f"[SDR] ADC CLIPPING: {rail_frac*100:.3f}% at {rail_type} rails, raw_max={raw_max}, "
                          f"TOTAL_GAIN={total_gain:.1f} dB (gain={self.gain_db:.1f}, lna={lna_gain}, bt200={'ON' if bt200_status else 'OFF'}). "
                          f"Signal: mean={normalized_mean:.4f}, std={normalized_std:.4f}, ratio={signal_ratio:.2f}. "
-                         f"DC offset: {dc_offset_mag:.4f}. CAUSE: {cause_msg}")
+                         f"DC offset: {dc_offset_mag:.4f}. {cause_msg}")
         
-        # Log comprehensive diagnostics if clipping or high levels detected
-        # Log more frequently when clipping (every 50 reads instead of 200) to catch issues faster
-        log_interval = 50 if (rail_frac > 0.001 or raw_max > 1500) else 200
-        if (rail_frac > 0.001 or fs_frac > 0.001 or raw_max > 1500) and self._health_stats["successful_reads"] % log_interval == 0:
+        elif rail_frac > 0.001 and in_startup_period and not self._startup_clipping_warned:
+            # Minor clipping during startup - log once as INFO, not WARNING
+            self._startup_clipping_warned = True
+            normalized_mean = float(np.mean(np.abs(iq)))
+            logger.info(f"[SDR] Minor transient clipping during stream startup ({rail_frac*100:.3f}%), "
+                       f"raw_max={raw_max}, mean={normalized_mean:.4f} - this is normal and will stabilize.")
+        
+        # Log comprehensive diagnostics if significant clipping or high levels detected
+        # Only log when there's actual concern (>1% clipping or very high levels)
+        # Skip diagnostic logging during startup grace period to reduce noise
+        should_log_diagnostics = (
+            not in_startup_period and
+            (rail_frac > 0.01 or fs_frac > 0.01 or raw_max > 1800) and
+            self._health_stats["successful_reads"] % 100 == 0
+        )
+        
+        if should_log_diagnostics:
             normalized_max = float(np.max(np.abs(iq)))
             normalized_mean = float(np.mean(np.abs(iq)))
             normalized_std = float(np.std(np.abs(iq)))
-            
-            # Calculate signal statistics to identify if there's a strong signal present
-            # If std is high relative to mean, there's likely a strong signal
             signal_ratio = normalized_std / max(normalized_mean, 0.001)
             
             logger.info(f"[SDR] Signal levels: raw_max={raw_max}, normalized_max={normalized_max:.4f}, "
                        f"normalized_mean={normalized_mean:.4f}, normalized_std={normalized_std:.4f}, "
                        f"signal_ratio={signal_ratio:.2f}, "
-                       f"dc_offset_mag={dc_offset_mag:.4f} (I={dc_offset_i:.4f}, Q={dc_offset_q:.4f}), "
+                       f"dc_offset_mag={dc_offset_mag:.4f}, "
                        f"rail_frac={rail_frac*100:.3f}%, fs_frac={fs_frac*100:.3f}%")
             
-            # If DC offset is significant, it could be causing clipping
-            if dc_offset_mag > 0.1:
+            # Only warn about DC offset if it's really significant
+            if dc_offset_mag > 0.15:
                 logger.warning(f"[SDR] LARGE DC OFFSET DETECTED: {dc_offset_mag:.4f} (I={dc_offset_i:.4f}, Q={dc_offset_q:.4f}). "
                              f"This can cause clipping and raise noise floor. Check LO leakage or hardware issues.")
             
-            # If signal_ratio is high (>2.0) and mean is high, there's likely a strong signal present
-            if signal_ratio > 2.0 and normalized_mean > 0.2:
+            # Only warn about strong signal if ratio clearly indicates narrowband signal
+            if signal_ratio > 2.5 and normalized_mean > 0.3:
                 logger.warning(f"[SDR] STRONG SIGNAL DETECTED: signal_ratio={signal_ratio:.2f}, mean={normalized_mean:.4f}. "
-                             f"Even at 0 dB gain, a very strong nearby transmitter (e.g., ELRS at 915 MHz) "
-                             f"can cause clipping. Try: 1) Move transmitter away, 2) Use different frequency, "
-                             f"3) Add external attenuator if needed.")
+                             f"Strong nearby transmitter present. Consider: 1) Move transmitter away, "
+                             f"2) Use different frequency, 3) Add external attenuator if needed.")
 
         # CRITICAL: Zero the tail to prevent stale data contamination
         # This ensures no old samples remain in the unused portion of the preallocated buffer

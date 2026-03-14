@@ -42,23 +42,37 @@ async def events_ws(websocket: WebSocket, orchestrator):
             for task in pending:
                 task.cancel()
 
-            # Get the completed task
-            task = next(iter(done))
-            topic = task_to_topic[task]
-            payload = task.result()
+            # Process ALL completed tasks (not just one!)
+            # This fixes the bug where rapid events would be lost
+            for task in done:
+                topic = task_to_topic[task]
+                try:
+                    payload = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except Exception as e:
+                    print(f"[NOTIFY WS] Error getting result for {topic}: {e}")
+                    continue
 
-            # Always send typed envelope
-            await websocket.send_json({
-                "type": topic,
-                "payload": payload,
-                "ts": (
-                    payload.get("timestamp")
-                    if isinstance(payload, dict)
-                    else None
-                ),
-            })
+                # Always send typed envelope
+                msg = {
+                    "type": topic,
+                    "payload": payload,
+                    "ts": (
+                        payload.get("timestamp")
+                        if isinstance(payload, dict)
+                        else None
+                    ),
+                }
+                # Debug: log capture events
+                if topic in ("capture_start", "capture_complete", "edge_mode"):
+                    print(f"[NOTIFY WS] Sending {topic} event to client: {payload}")
+                await websocket.send_json(msg)
 
     except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        # Graceful shutdown - don't log as error
         pass
 
     finally:

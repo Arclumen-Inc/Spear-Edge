@@ -30,10 +30,15 @@ class EventBus:
 
     def publish_nowait(self, topic: str, event: Any) -> None:
         qs = self._subs.get(topic, [])
+        delivered = 0
         for q in list(qs):
             try:
                 if q.full():
                     _ = q.get_nowait()
                 q.put_nowait(event)
+                delivered += 1
             except Exception:
                 pass
+        # Debug: log important events
+        if topic in ("capture_start", "capture_complete", "edge_mode"):
+            print(f"[EVENT BUS] Published {topic} to {delivered}/{len(qs)} subscribers")

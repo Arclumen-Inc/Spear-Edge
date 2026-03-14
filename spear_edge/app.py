@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -170,27 +171,89 @@ def create_app() -> FastAPI:
         if orchestrator.mode == "armed":
             count = orchestrator._count_connected_tripwires()
             orchestrator._send_atak_status(online=True, tripwire_count=count)
+        
+        # Register signal handler to stop scan immediately on SIGINT/SIGTERM
+        # This allows graceful shutdown on first Ctrl+C instead of waiting
+        _shutting_down = False
+        
+        def _signal_handler(signum, frame):
+            nonlocal _shutting_down
+            print(f"\n[SIGNAL] Received signal {signum}, stopping scan...")
+            
+            # Stop scan synchronously by setting flags
+            if orchestrator._scan:
+                orchestrator._scan._running = False
+            if orchestrator._rx_task:
+                orchestrator._rx_task._running = False
+                orchestrator._rx_task._stop_event.set()
+            # Deactivate SDR stream to unblock reads
+            if orchestrator.sdr and hasattr(orchestrator.sdr, '_deactivate_stream'):
+                try:
+                    orchestrator.sdr._deactivate_stream()
+                except Exception:
+                    pass
+            
+            if _shutting_down:
+                # Second signal - force exit
+                print("[SIGNAL] Force quit...")
+                os._exit(1)
+            
+            _shutting_down = True
+            # Restore default handler and re-raise signal to let uvicorn handle it
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+        
+        # Install handler
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
 
     @app.on_event("shutdown")
     async def _shutdown():
-        shutdown_timeout_s = 15.0
+        print("[SHUTDOWN] Starting graceful shutdown...")
+        shutdown_timeout_s = 10.0
+        
+        # Send offline status to ATAK
         try:
             orchestrator._send_atak_status(online=False)
         except Exception:
             pass
+        
+        # Stop capture manager first (it might be holding SDR resources)
         try:
             if hasattr(capture_manager, "stop"):
+                print("[SHUTDOWN] Stopping capture manager...")
                 await asyncio.wait_for(capture_manager.stop(), timeout=shutdown_timeout_s)
+                print("[SHUTDOWN] Capture manager stopped")
         except asyncio.TimeoutError:
-            logging.warning("[SHUTDOWN] capture_manager.stop() timed out")
-        except Exception:
-            pass
+            print("[SHUTDOWN] WARNING: capture_manager.stop() timed out")
+        except Exception as e:
+            print(f"[SHUTDOWN] WARNING: capture_manager error: {e}")
+        
+        # Stop GPS client
         try:
+            if state.gps:
+                print("[SHUTDOWN] Stopping GPS client...")
+                state.gps.stop()
+                print("[SHUTDOWN] GPS client stopped")
+        except Exception as e:
+            print(f"[SHUTDOWN] WARNING: GPS stop error: {e}")
+        
+        # Close orchestrator (SDR, scan tasks, rx task)
+        try:
+            print("[SHUTDOWN] Closing orchestrator...")
             await asyncio.wait_for(orchestrator.close(), timeout=shutdown_timeout_s)
+            print("[SHUTDOWN] Orchestrator closed")
         except asyncio.TimeoutError:
-            logging.warning("[SHUTDOWN] orchestrator.close() timed out")
-        except Exception:
-            pass
+            print("[SHUTDOWN] WARNING: orchestrator.close() timed out - forcing SDR close")
+            try:
+                if state.sdr:
+                    state.sdr.close()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[SHUTDOWN] WARNING: orchestrator error: {e}")
+        
+        print("[SHUTDOWN] Graceful shutdown complete")
 
     return app
 

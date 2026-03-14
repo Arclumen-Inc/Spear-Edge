@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SPEAR-Edge ML Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* ML Dashboard specific styles */
+    .ml-dashboard {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      gap: 16px;
+      padding: 16px;
+      max-width: 1800px;
+      margin: 0 auto;
+    }
+
+    .ml-full-width {
+      grid-column: 1 / -1;
+    }
+
+    .capture-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+      max-height: 600px;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .capture-card {
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 8px;
+      padding: 8px;
+      background: var(--bg-panel);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      position: relative;
+    }
+
+    .capture-card:hover {
+      border-color: var(--accent-green);
+      background: var(--accent-green-dim);
+    }
+
+    .capture-card.selected {
+      border-color: var(--accent-green);
+      background: var(--accent-green-dim);
+      box-shadow: 0 0 8px rgba(60, 255, 158, 0.3);
+    }
+
+    .capture-card input[type="checkbox"] {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent-green);
+    }
+
+    .capture-thumb {
+      width: 100%;
+      height: 120px;
+      object-fit: contain;
+      background: #000;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    }
+
+    .capture-info {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .capture-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-green);
+      margin: 4px 0;
+    }
+
+    .capture-label select {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 4px;
+      padding: 4px;
+      color: var(--text-main);
+      font-size: 11px;
+    }
+
+    .capture-label select option,
+    .filter-bar select option,
+    .train-controls select option {
+      background: #fff;
+      color: #000;
+    }
+
+    .filter-bar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .filter-bar input,
+    .filter-bar select {
+      flex: 1;
+      min-width: 150px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 4px;
+      padding: 6px 8px;
+      color: var(--text-main);
+      font-size: 12px;
+    }
+
+    .batch-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--bg-panel-border);
+    }
+
+    .batch-actions button {
+      flex: 1;
+      padding: 8px 12px;
+      background: transparent;
+      border: 1px solid var(--accent-green-dim);
+      color: var(--accent-green);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.2s ease;
+    }
+
+    .batch-actions button:hover:not(:disabled) {
+      background: var(--accent-green-dim);
+    }
+
+    .batch-actions button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .model-info {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .model-info-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 12px;
+    }
+
+    .model-info-label {
+      color: var(--text-muted);
+    }
+
+    .model-info-value {
+      color: var(--accent-green);
+      font-family: monospace;
+    }
+
+    .model-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .model-actions button {
+      padding: 10px 16px;
+      background: transparent;
+      border: 1px solid var(--accent-green-dim);
+      color: var(--accent-green);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s ease;
+    }
+
+    .model-actions button:hover {
+      background: var(--accent-green-dim);
+    }
+
+    .model-list {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .model-item {
+      padding: 8px;
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 4px;
+      margin-bottom: 8px;
+      font-size: 11px;
+    }
+
+    .model-item.active {
+      border-color: var(--accent-green);
+      background: var(--accent-green-dim);
+    }
+
+    .activate-model-btn {
+      padding: 4px 8px;
+      font-size: 10px;
+      background: transparent;
+      border: 1px solid var(--accent-green-dim);
+      color: var(--accent-green);
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s ease;
+    }
+
+    .activate-model-btn:hover {
+      background: var(--accent-green-dim);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
+    }
+
+    .stat-card {
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 6px;
+      padding: 12px;
+    }
+
+    .stat-label {
+      color: var(--text-muted);
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      color: var(--accent-green);
+      font-size: 20px;
+      font-weight: 600;
+      font-family: monospace;
+    }
+
+    .label-distribution {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 12px;
+    }
+
+    .label-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 8px;
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 4px;
+      font-size: 11px;
+    }
+
+    .label-name {
+      color: var(--text-main);
+    }
+
+    .label-count {
+      color: var(--accent-green);
+      font-family: monospace;
+    }
+
+    .file-input-wrapper {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+    }
+
+    .file-input-wrapper input[type="file"] {
+      position: absolute;
+      opacity: 0;
+      width: 100%;
+      height: 100%;
+      cursor: pointer;
+    }
+
+    .file-input-label {
+      display: block;
+      padding: 10px 16px;
+      background: transparent;
+      border: 1px solid var(--accent-green-dim);
+      color: var(--accent-green);
+      border-radius: 6px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .file-input-label:hover {
+      background: var(--accent-green-dim);
+    }
+
+    .loading {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    .quick-train-panel {
+      background: rgba(60, 255, 158, 0.05);
+      border: 1px solid var(--accent-green-dim);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .quick-train-info {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      line-height: 1.4;
+    }
+
+    .train-progress {
+      display: none;
+      margin: 12px 0;
+    }
+
+    .train-progress.active {
+      display: block;
+    }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 20px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent-green);
+      transition: width 0.3s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #000;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .train-status {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-align: center;
+    }
+
+    .train-controls {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .train-controls input,
+    .train-controls select {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 4px;
+      padding: 6px 8px;
+      color: var(--text-main);
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <header id="top-bar">
+    <div id="title">SPEAR-EDGE ML DASHBOARD</div>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      <a href="/" style="color: var(--accent-green); text-decoration: none; font-size: 13px;">← Back to Main</a>
+    </div>
+  </header>
+
+  <div class="ml-dashboard">
+    <!-- Left: Capture Management -->
+    <div class="panel">
+      <div class="panel-header">
+        <span>Capture Management</span>
+        <button id="btnRefreshCaptures" style="padding: 4px 8px; font-size: 11px;">Refresh</button>
+      </div>
+      <div class="panel-body">
+        <div class="filter-bar">
+          <input type="text" id="filterSearch" placeholder="Search captures...">
+          <select id="filterLabel">
+            <option value="">All Labels</option>
+          </select>
+          <select id="filterSource">
+            <option value="">All Sources</option>
+            <option value="manual">Manual</option>
+            <option value="armed">Armed</option>
+            <option value="tasked">Tasked</option>
+          </select>
+        </div>
+        <div id="captureGrid" class="capture-grid">
+          <div class="empty-state">Loading captures...</div>
+        </div>
+        <div class="batch-actions">
+          <button id="btnBatchLabel" disabled>Update Selected Labels</button>
+          <button id="btnExportSelected" disabled>Export Selected</button>
+          <button id="btnDeleteSelected" disabled>Delete Selected</button>
+        </div>
+        
+        <!-- ML Statistics -->
+        <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--bg-panel-border);">
+          <div class="panel-header" style="margin: 0 0 12px 0;">ML Statistics</div>
+          <div id="mlStats" class="stats-grid">
+            <div class="empty-state">Loading statistics...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Model Management -->
+    <div class="panel">
+      <div class="panel-header">Model Management</div>
+      <div class="panel-body">
+        <div id="currentModelInfo" class="model-info">
+          <div class="empty-state">Loading model info...</div>
+        </div>
+        
+        <!-- Quick Train Panel -->
+        <div class="quick-train-panel">
+          <div class="panel-header" style="margin: 0 0 8px 0; padding: 0; border: none;">
+            <span style="font-size: 12px;">Quick Train</span>
+          </div>
+          <div class="quick-train-info">
+            Fine-tune model on 1-2 selected captures (5-15 min). Only trains the classification head.
+          </div>
+          <div class="train-controls">
+            <select id="trainLabel">
+              <option value="">Select Label</option>
+            </select>
+            <input type="number" id="trainEpochs" value="15" min="5" max="30" placeholder="Epochs">
+          </div>
+          <div class="train-progress" id="trainProgress">
+            <div class="progress-bar-container">
+              <div class="progress-bar-fill" id="trainProgressFill" style="width: 0%;">0%</div>
+            </div>
+            <div class="train-status" id="trainStatus">Initializing...</div>
+          </div>
+          <div style="display: flex; gap: 8px; margin-top: 8px;">
+            <button id="btnQuickTrain" disabled style="flex: 1; padding: 8px; font-size: 12px;">Start Quick Train</button>
+            <button id="btnCancelTrain" disabled style="padding: 8px 12px; font-size: 12px; display: none;">Cancel</button>
+          </div>
+        </div>
+
+        <div class="model-actions">
+          <button id="btnExportModel">Export Current Model</button>
+          <div class="file-input-wrapper">
+            <input type="file" id="fileImportModel" accept=".zip">
+            <label for="fileImportModel" class="file-input-label">Import New Model</label>
+          </div>
+          <button id="btnTestModel" disabled>Test Model on Selected</button>
+        </div>
+        <div class="panel-header" style="margin-top: 16px; margin-bottom: 8px;">Available Models</div>
+        <div id="modelList" class="model-list">
+          <div class="empty-state">Loading models...</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="ml.js"></script>
+</body>
+</html>

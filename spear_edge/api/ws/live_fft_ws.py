@@ -1,4 +1,5 @@
 # spear_edge/api/ws/live_fft_ws.py
+import asyncio
 import json
 import struct
 import time
@@ -92,6 +93,9 @@ async def live_fft_ws(websocket: WebSocket, orchestrator):
             await websocket.send_bytes(payload)
 
     except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        # Graceful shutdown - don't log as error
         pass
     finally:
         await orchestrator.bus.unsubscribe("live_spectrum", q)

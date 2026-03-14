@@ -152,12 +152,71 @@ class Orchestrator:
         self._open = True
 
     async def close(self) -> None:
-        async with self._lock:
-            if self._scan and self._scan.is_running():
-                await self._scan.stop()
-            if self._open:
-                self.sdr.close()
+        """Gracefully shutdown orchestrator - stop all tasks and close SDR."""
+        print("[ORCH] close() - starting shutdown...")
+        
+        # STEP 1: Signal all tasks to stop (non-blocking)
+        if self._scan:
+            self._scan._running = False
+        if self._rx_task:
+            self._rx_task._running = False
+            self._rx_task._stop_event.set()
+        
+        # STEP 2: Deactivate SDR stream FIRST - this makes blocking read_samples() return immediately
+        # Critical: Do this BEFORE waiting for rx_task thread to prevent blocking
+        if self.sdr:
+            print("[ORCH] Deactivating SDR stream...")
+            try:
+                # Use internal method (with underscore)
+                if hasattr(self.sdr, '_deactivate_stream'):
+                    self.sdr._deactivate_stream()
+                elif hasattr(self.sdr, 'deactivate_stream'):
+                    self.sdr.deactivate_stream()
+            except Exception as e:
+                print(f"[ORCH] Stream deactivation warning: {e}")
+        
+        # STEP 3: Now wait for tasks to stop (they should exit quickly since stream is deactivated)
+        try:
+            # Use wait_for instead of asyncio.timeout (Python 3.10 compatible)
+            async def _cleanup():
+                async with self._lock:
+                    # Stop scan task (FFT processing)
+                    if self._scan and self._scan.is_running():
+                        print("[ORCH] Stopping scan task...")
+                        await self._scan.stop()
+                        print("[ORCH] Scan task stopped")
+                    self._scan = None
+                    
+                    # Stop RX task (blocking read thread)
+                    if self._rx_task and self._rx_task.is_running():
+                        print("[ORCH] Stopping RX task...")
+                        await self._rx_task.stop()
+                        print("[ORCH] RX task stopped")
+                    self._rx_task = None
+                    
+                    self._ring = None
+                    
+                    # Close SDR device
+                    if self._open and self.sdr:
+                        print("[ORCH] Closing SDR...")
+                        self.sdr.close()
+                        self._open = False
+                        print("[ORCH] SDR closed")
+            
+            await asyncio.wait_for(_cleanup(), timeout=5.0)
+        except asyncio.TimeoutError:
+            print("[ORCH] WARNING: Shutdown timed out - forcing cleanup")
+            # Force cleanup without waiting
+            self._scan = None
+            self._rx_task = None
+            if self.sdr:
+                try:
+                    self.sdr.close()
+                except Exception:
+                    pass
                 self._open = False
+        
+        print("[ORCH] close() - shutdown complete")
 
     # -------------------------------------------------
     # Scan control (RX task + ring buffer)

@@ -15,8 +15,8 @@ Environment=SPEAR_LOG_LEVEL=INFO
 
 ExecStart=/home/spear/spear-edgev1_0/venv/bin/uvicorn spear_edge.app:app --host 0.0.0.0 --port 8080
 
-# Graceful shutdown settings
-TimeoutStopSec=20
+# Graceful shutdown settings - should complete within 10s now
+TimeoutStopSec=15
 KillMode=mixed
 KillSignal=SIGTERM
 
