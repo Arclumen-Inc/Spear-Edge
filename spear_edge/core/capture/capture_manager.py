@@ -75,6 +75,9 @@ class CaptureManager:
             if model_path.exists():
                 self.classifier = PyTorchRfClassifier(str(model_path))
                 print(f"[CaptureManager] Loaded PyTorch GPU classifier from {model_path}")
+                # Ensure model_path is stored
+                if not hasattr(self.classifier, "model_path") or not self.classifier.model_path:
+                    self.classifier.model_path = str(model_path)
             else:
                 # Try creating a new model if no saved model exists
                 print(f"[CaptureManager] PyTorch model not found, creating new model")
@@ -95,6 +98,9 @@ class CaptureManager:
                 if model_path.exists():
                     self.classifier = ONNXRfClassifier(str(model_path))
                     print("[CaptureManager] Loaded ONNX classifier")
+                    # Ensure model_path is stored
+                    if not hasattr(self.classifier, "model_path") or not self.classifier.model_path:
+                        self.classifier.model_path = str(model_path)
                 else:
                     print(f"[CaptureManager] ONNX model not found: {model_path}")
             except ImportError as e:
@@ -199,15 +205,21 @@ class CaptureManager:
             self.state = "capturing"
             
             # Publish capture start event
-            self.orch.bus.publish_nowait("capture_start", {
+            capture_start_payload = {
                 "freq_hz": req.freq_hz,
                 "sample_rate_sps": req.sample_rate_sps,
                 "duration_s": req.duration_s,
                 "reason": req.reason,
                 "source_node": req.source_node,
                 "ts": time.time(),
-            })
+            }
+            print(f"[CAPTURE] Publishing capture_start event: reason={req.reason}, freq={req.freq_hz/1e6:.3f} MHz")
+            self.orch.bus.publish_nowait("capture_start", capture_start_payload)
+            
+            # Set mode to tasked and notify UI
             self.orch.mode = "tasked"
+            self.orch.bus.publish_nowait("edge_mode", {"mode": "tasked", "ts": time.time()})
+            
             self.orch.task_info = {
                 "source": req.reason,
                 "source_node": req.source_node,
@@ -599,6 +611,8 @@ class CaptureManager:
                 self.state = "idle"
                 self.orch.mode = prev_mode
                 self.orch.task_info = prev_task_info
+                # Notify UI that mode is restored
+                self.orch.bus.publish_nowait("edge_mode", {"mode": prev_mode, "ts": time.time()})
 
     # --------------------------------------------------
     # Scan snapshot / resume

@@ -394,14 +394,24 @@ def main():
     
     new_num_classes = len(class_to_index)
     
-    if new_num_classes <= old_num_classes:
-        print(f"[ERROR] New number of classes ({new_num_classes}) must be greater than old ({old_num_classes})")
+    # Check if we're adding a new class or fine-tuning existing
+    if new_num_classes > old_num_classes:
+        # Adding new class - extend model
+        print(f"[INFO] Extending model from {old_num_classes} to {new_num_classes} classes")
+        model = create_extended_model(args.model_path, old_num_classes, new_num_classes)
+    elif new_num_classes == old_num_classes:
+        # Fine-tuning existing class - load model as-is
+        print(f"[INFO] Fine-tuning existing model with {old_num_classes} classes (class: {args.new_class_id})")
+        checkpoint = torch.load(args.model_path, map_location='cpu')
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            model = RFClassifier(num_classes=old_num_classes)
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model = RFClassifier(num_classes=old_num_classes)
+            model.load_state_dict(checkpoint)
+    else:
+        print(f"[ERROR] New number of classes ({new_num_classes}) cannot be less than old ({old_num_classes})")
         return 1
-    
-    print(f"[INFO] Extending model from {old_num_classes} to {new_num_classes} classes")
-    
-    # Create extended model
-    model = create_extended_model(args.model_path, old_num_classes, new_num_classes)
     
     # Freeze feature extraction
     model = freeze_feature_extraction(model)
@@ -433,9 +443,17 @@ def main():
         weight_decay=1e-4
     )
     
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=args.learning_rate * 0.01
+    )
+    
     # Training loop
     print(f"\n[INFO] Starting fine-tuning for {args.epochs} epochs...")
     best_val_acc = 0.0
+    train_history = []
     
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -443,29 +461,61 @@ def main():
         print(f"Epoch {epoch}/{args.epochs}:")
         print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
         
+        val_loss = None
+        val_acc = None
         if val_loader:
             val_loss, val_acc = validate(model, val_loader, criterion, device)
             print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
-            
-            # Save best model
+        
+        # Update learning rate
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+        
+        # Record history
+        train_history.append({
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'train_acc': train_acc,
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'learning_rate': current_lr
+        })
+        
+        # Save full checkpoint (with optimizer states, scheduler, history)
+        checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'num_classes': old_num_classes if new_num_classes == old_num_classes else new_num_classes,
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'train_acc': train_acc,
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'learning_rate': current_lr,
+            'new_class_id': args.new_class_id,
+            'train_history': train_history,
+            'fine_tuned_from': str(args.model_path),
+            'fine_tune_config': {
+                'epochs': args.epochs,
+                'batch_size': args.batch_size,
+                'learning_rate': args.learning_rate,
+                'include_old_data': args.include_old_data,
+                'old_data_ratio': args.old_data_ratio,
+            }
+        }
+        
+        if val_loader:
+            # Save best model based on validation accuracy
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'num_classes': new_num_classes,
-                    'epoch': epoch,
-                    'val_accuracy': val_acc,
-                    'new_class_id': args.new_class_id,
-                }, args.output_path)
+                checkpoint['best_val_acc'] = best_val_acc
+                torch.save(checkpoint, args.output_path)
                 print(f"  ✓ Saved best model (val_acc: {val_acc:.2f}%)")
         else:
             # Save model every epoch if no validation
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'num_classes': new_num_classes,
-                'epoch': epoch,
-                'new_class_id': args.new_class_id,
-            }, args.output_path)
+            torch.save(checkpoint, args.output_path)
+            print(f"  ✓ Saved model checkpoint (epoch {epoch})")
     
     print(f"\n[SUCCESS] Fine-tuning complete!")
     print(f"  Model saved to: {args.output_path}")

@@ -193,6 +193,10 @@ def bind(orchestrator) -> APIRouter:
 
     @router.post("/mode/set")
     def set_mode(req: SetModeRequest):
+        """
+        Set Edge mode (manual or armed).
+        Uses orchestrator.set_mode() to ensure ATAK and Tripwire notifications.
+        """
         if req.mode not in ("manual", "armed"):
             return {
                 "ok": False,
@@ -200,8 +204,11 @@ def bind(orchestrator) -> APIRouter:
                 "allowed": ["manual", "armed"],
             }
 
-        orchestrator.mode = req.mode
-        return {"ok": True, "mode": orchestrator.mode}
+        try:
+            orchestrator.set_mode(req.mode)
+            return {"ok": True, "mode": orchestrator.mode}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
 
     @router.get("/mode")
     def get_mode():
@@ -231,6 +238,39 @@ def bind(orchestrator) -> APIRouter:
         # Keep your debug line (safe)
         print("[CAPTURE_LOG_READ]", id(orchestrator), 0)
         return {"captures": orchestrator.list_captures(limit=limit)}
+
+    # -------------------------------------------------
+    # SDR gain-only (for real-time slider; no tune/rate change)
+    # -------------------------------------------------
+
+    class SdrGainRequest(BaseModel):
+        gain_mode: GainMode = GainMode.MANUAL
+        gain_db: float = 0.0
+
+    @router.post("/sdr/gain")
+    async def set_sdr_gain(req: SdrGainRequest):
+        """Apply only gain. Does not change frequency, sample rate, or bandwidth. Use for real-time gain slider."""
+        async with _config_lock:
+            if getattr(orchestrator, "mode", None) == "tasked":
+                return {"ok": False, "error": "SDR locked in TASKED mode"}
+            prev = getattr(orchestrator, "sdr_config", None)
+            if prev is None:
+                return {"ok": False, "error": "no current config"}
+            new_cfg = SdrConfig(
+                center_freq_hz=prev.center_freq_hz,
+                sample_rate_sps=prev.sample_rate_sps,
+                gain_mode=req.gain_mode,
+                gain_db=req.gain_db,
+                rx_channel=prev.rx_channel,
+                bandwidth_hz=prev.bandwidth_hz,
+                bt200_enabled=getattr(prev, "bt200_enabled", None),
+                dual_channel=getattr(prev, "dual_channel", False),
+            )
+            orchestrator.sdr_config = new_cfg
+            err = _safe_apply_gain_only(new_cfg)
+            if err:
+                return {"ok": False, "error": "gain_update_failed", "detail": err}
+            return {"ok": True}
 
     # -------------------------------------------------
     # SDR config (safe: avoids double-tune + avoids mid-stream retune)

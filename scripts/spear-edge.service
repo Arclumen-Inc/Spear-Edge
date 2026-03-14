@@ -1,0 +1,30 @@
+[Unit]
+Description=SPEAR Edge UI/API server
+After=network-online.target
+Wants=network-online.target spear-ingest.service
+Requires=spear-ingest.service
+After=spear-ingest.service
+
+[Service]
+User=spear
+Group=spear
+WorkingDirectory=/home/spear/spear-edgev1_0
+
+Environment=PYTHONUNBUFFERED=1
+Environment=SPEAR_LOG_LEVEL=INFO
+
+ExecStart=/home/spear/spear-edgev1_0/venv/bin/uvicorn spear_edge.app:app --host 0.0.0.0 --port 8080
+
+# Graceful shutdown settings
+TimeoutStopSec=20
+KillMode=mixed
+KillSignal=SIGTERM
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

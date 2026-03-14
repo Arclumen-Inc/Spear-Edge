@@ -40,6 +40,9 @@ class ONNXRfClassifier:
         if not model_path.exists():
             raise FileNotFoundError(f"ONNX model not found: {model_path}")
         
+        # Store model path for API access
+        self.model_path = str(model_path)
+        
         # Build provider list (try TensorRT first, then CUDA, then CPU)
         providers = []
         available_providers = ort.get_available_providers()

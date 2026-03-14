@@ -85,8 +85,27 @@ async def tripwire_link_ws(websocket: WebSocket, orchestrator) -> None:
         )
         orchestrator.bus.publish_nowait("tripwire_nodes", {"nodes": orchestrator.tripwires.snapshot()})
 
-        # --- Send current Edge state back ---
-        await websocket.send_text(json.dumps({"type": "edge_state", "mode": orchestrator.mode}))
+        # --- Send current Edge state back (v2.0 format) ---
+        # Build active_nodes list from connected tripwires
+        active_nodes = []
+        nodes = orchestrator.tripwires.snapshot()
+        now = time.time()
+        for node in nodes:
+            last_seen = node.get("last_seen", 0)
+            if (now - last_seen) < STALE_AFTER_S:
+                active_nodes.append(node.get("node_id", "unknown"))
+        
+        # Count TAIs (AoA cones that can contribute to triangulation)
+        tai_count = len(getattr(orchestrator, "aoa_cones", []))
+        
+        edge_state = {
+            "type": "edge_state",
+            "mode": orchestrator.mode,
+            "active_nodes": active_nodes,
+            "tai_count": tai_count,
+            "timestamp": now,
+        }
+        await websocket.send_text(json.dumps(edge_state))
 
         # --- Main loop: heartbeats and status ---
         while True:
@@ -106,6 +125,36 @@ async def tripwire_link_ws(websocket: WebSocket, orchestrator) -> None:
             if msg_type == "status":
                 orchestrator.tripwires.update_ws_status(node_id=node_id, status=msg)
                 orchestrator.bus.publish_nowait("tripwire_nodes", {"nodes": orchestrator.tripwires.snapshot()})
+                continue
+            
+            if msg_type == "command_response":
+                # Handle command response from Tripwire (e.g., scan plan change confirmation)
+                action = msg.get("action", "unknown")
+                command_id = msg.get("command_id")
+                status = msg.get("status", "unknown")
+                message = msg.get("message", "")
+                
+                print(f"[TRIPWIRE-WS] Command response from {node_id}: action={action}, status={status}, command_id={command_id}")
+                if message:
+                    print(f"[TRIPWIRE-WS] Response message: {message}")
+                
+                # Publish to event bus for UI/logging
+                orchestrator.bus.publish_nowait("command_response", {
+                    "node_id": node_id,
+                    "action": action,
+                    "command_id": command_id,
+                    "status": status,
+                    "message": message,
+                    "ts": time.time(),
+                })
+                
+                # Track pending command completion if we have command tracking
+                if hasattr(orchestrator, "_pending_commands") and command_id:
+                    pending = orchestrator._pending_commands.get(command_id)
+                    if pending:
+                        pending["status"] = status
+                        pending["response"] = msg
+                        pending["completed_at"] = time.time()
                 continue
 
             # Ignore unknown types silently

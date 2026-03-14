@@ -167,6 +167,15 @@ const API = {
     });
     return await r.json().catch(() => ({}));
   },
+  /** Apply only gain (for real-time slider). Does not send frequency/rate/bandwidth. */
+  async sdrGainOnly(payload) {
+    const r = await fetch("/live/sdr/gain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return await r.json().catch(() => ({}));
+  },
 };
 
 // ------------------------------
@@ -231,6 +240,9 @@ let wfBrightness = 0;  // Offset in dB (-50 to +50)
 let wfContrast = 1.0;  // Contrast multiplier (0.1 to 3.0)
 let lastCanvasW         = 0;
 let lastCanvasH         = 0;
+
+// WebSocket reconnection state (FFT)
+let fftReconnectTimer   = null;
 
 // ------------------------------
 // OPERATOR CUE QUEUE (fixed + robust)
@@ -338,11 +350,9 @@ async function refreshEdgeMode() {
   try {
     const r = await fetch(`/api/edge/mode`);
     const j = await r.json();
-    const mode = j.mode || "unknown";
-    // Mode is shown via button highlighting
-    if (btnManual) btnManual.classList.toggle("active", mode === "manual");
-    if (btnArmed) btnArmed.classList.toggle("active", mode === "armed");
-    if (armedBanner) armedBanner.style.display = mode === "armed" ? "block" : "none";
+    const mode = j.mode || "manual";
+    // Update global state and UI via setEdgeMode (single source of truth)
+    setEdgeMode(mode);
   } catch (_) {}
 }
 
@@ -513,6 +523,10 @@ function readSdrForm() {
 
 // Debounce timer for SDR config changes (frequency, sample rate, bandwidth)
 let sdrConfigDebounceTimer = null;
+
+// When user last moved the gain slider (ms). Polling must not overwrite slider for a short period.
+let lastGainSliderInputAt = 0;
+const GAIN_SLIDER_GRACE_MS = 1500;
 
 async function applySdrConfig() {
   if (edgeMode === "tasked") return;
@@ -1351,7 +1365,8 @@ function parseBinarySpectrumFrame(arrayBuffer) {
 }
 
 function startFftWs() {
-  if (fftWs) {
+  // Avoid multiple connections or connecting while tab is hidden
+  if (fftWs || (typeof document !== "undefined" && document.hidden)) {
     console.log("[FFT WS] WebSocket already exists, skipping");
     return;
   }
@@ -1361,6 +1376,10 @@ function startFftWs() {
   fftWs.onopen = () => {
     console.log("[FFT WS] WebSocket connected successfully!");
     setLed(wsLed, true);
+    if (fftReconnectTimer) {
+      clearTimeout(fftReconnectTimer);
+      fftReconnectTimer = null;
+    }
   };
   fftWs.onerror = (e) => {
     console.error("[FFT WS] WebSocket error:", e);
@@ -1426,10 +1445,19 @@ function startFftWs() {
       console.warn("[FFT WS] onmessage parse failed:", e);
     }
   };
-  fftWs.onerror = () => setLed(wsLed, false);
   fftWs.onclose = () => {
     setLed(wsLed, false);
     fftWs = null;
+    // Auto-reconnect if tab is visible
+    if (typeof document !== "undefined" && !document.hidden) {
+      if (fftReconnectTimer) {
+        clearTimeout(fftReconnectTimer);
+      }
+      fftReconnectTimer = setTimeout(() => {
+        fftReconnectTimer = null;
+        startFftWs();
+      }, 3000);
+    }
   };
 }
 
@@ -1465,7 +1493,7 @@ function startNotifyWs() {
 
       } else if (msg.type === "edge_mode") {
         console.log("[NOTIFY WS] Edge mode changed to:", msg.payload.mode);
-        refreshEdgeModeDisplay(msg.payload.mode);
+        setEdgeMode(msg.payload.mode);
 
       } else if (msg.type === "tripwire_cue") {
         console.log("[CUE] New RF cue received - adding to bottom panel:", msg.payload);
@@ -1483,14 +1511,19 @@ function startNotifyWs() {
         renderCues();
 
       } else if (msg.type === "capture_start") {
-        console.log("[CAPTURE] Capture started:", msg.payload);
+        console.log("[CAPTURE] *** CAPTURE STARTED ***", msg.payload);
         if (captureBanner) {
+          // Force show the banner
           captureBanner.classList.remove("hidden");
           captureBanner.classList.add("active");
+          captureBanner.style.display = "block";  // Direct style override
+          console.log("[CAPTURE] Banner shown - classes:", captureBanner.className);
         }
         if (captureProgressBar) {
           captureProgressBar.style.width = "0%";
         }
+        // Also update mode to tasked
+        setEdgeMode("tasked");
         // Reduce UI polling during capture to reduce scheduler contention
         window._capture_in_progress = true;
         // Clear any existing timeout
@@ -1522,7 +1555,7 @@ function startNotifyWs() {
         }
 
       } else if (msg.type === "capture_complete") {
-        console.log("[CAPTURE] Capture completed:", msg.payload);
+        console.log("[CAPTURE] *** CAPTURE COMPLETE ***", msg.payload);
         if (captureProgressBar) {
           captureProgressBar.style.width = "100%";
         }
@@ -1538,7 +1571,6 @@ function startNotifyWs() {
           console.log("[CAPTURE] Hiding banner (capture_complete event received)");
           captureBanner.classList.remove("active");
           captureBanner.classList.add("hidden");
-          // Force a style update
           captureBanner.style.display = "none";
           // Remove inline style after a moment to let CSS take over
           setTimeout(() => {
@@ -1547,6 +1579,8 @@ function startNotifyWs() {
             }
           }, 100);
         }
+        // Refresh mode (should return to armed/manual)
+        refreshEdgeMode();
       }
 
       if (msg.type === "classification_result") {
@@ -1673,8 +1707,8 @@ function updateSdrStatus(info) {
   if (sdrGainEl) sdrGainEl.textContent = (cfg.gain_db !== undefined) ? (cfg.gain_db + " dB") : "—";
   if (sdrGainModeEl) sdrGainModeEl.textContent = cfg.gain_mode || "manual";
   
-  // Update gain input from current_config
-  if (cfg.gain_db !== undefined && gainSlider) {
+  // Update gain input from current_config, but not if user just moved the slider (avoids snap-back to stale value)
+  if (cfg.gain_db !== undefined && gainSlider && (Date.now() - lastGainSliderInputAt) > GAIN_SLIDER_GRACE_MS) {
     gainSlider.value = cfg.gain_db;
     if (gainValue) {
       gainValue.textContent = cfg.gain_db;
@@ -1708,6 +1742,11 @@ async function refreshStatus() {
     setLed(sdrLed, !!j?.sdr_open);
     setLed(gpsLed, !!j?.gps?.fix && j.gps.fix !== "NO FIX");
     setLed(takLed, !!j?.tak_connected);
+    
+    // Reconnect FFT WebSocket when scan is running but we have no connection (e.g. returned from ML page)
+    if (j?.scan_running && (!fftWs || fftWs.readyState !== WebSocket.OPEN)) {
+      startFftWs();
+    }
     
     // Fallback: If banner is visible but we're not in capture mode, hide it
     if (captureBanner && captureBanner.classList.contains("active")) {
@@ -3103,20 +3142,8 @@ function init() {
   if (btnManualCapture) btnManualCapture.addEventListener("click", startManualCapture);
   if (gainModeSelect) gainModeSelect.addEventListener("change", updateGainUiLock);
   
-  // Add debouncing for frequency, sample rate, and bandwidth inputs
-  // This prevents rapid API calls when user is typing or changing values
-  if (freqInput) {
-    freqInput.addEventListener("input", applySdrConfigDebounced);
-    freqInput.addEventListener("change", applySdrConfigDebounced);
-  }
-  if (rateInput) {
-    rateInput.addEventListener("input", applySdrConfigDebounced);
-    rateInput.addEventListener("change", applySdrConfigDebounced);
-  }
-  if (bandwidthInput) {
-    bandwidthInput.addEventListener("input", applySdrConfigDebounced);
-    bandwidthInput.addEventListener("change", applySdrConfigDebounced);
-  }
+  // Frequency, sample rate, and bandwidth apply ONLY when "Apply SDR Settings" is clicked.
+  // (Gain slider still applies in real time via its own debounced handler below.)
   if (btnManual) btnManual.addEventListener("click", () => apiSetEdgeMode("manual"));
   if (btnArmed) btnArmed.addEventListener("click", () => apiSetEdgeMode("armed"));
   
@@ -3128,6 +3155,7 @@ function init() {
   if (gainSlider) {
     gainSlider.addEventListener("input", (e) => {
       const value = parseInt(e.target.value);
+      lastGainSliderInputAt = Date.now();
       // Update display immediately for smooth UI feedback
       if (gainValue) {
         gainValue.textContent = value;
@@ -3139,11 +3167,14 @@ function init() {
       }
       
       // Debounce: Wait 200ms after last slider movement before applying
-      // This prevents rapid API calls and segfaults from too many concurrent gain changes
+      // Use gain-only API so we never send partial freq/rate from the form (no tune on every stroke)
       gainDebounceTimer = setTimeout(() => {
-        // Auto-apply gain change if scan is running
         if (edgeMode !== "tasked") {
-          applySdrConfig();
+          const gainMode = gainModeSelect?.value || "manual";
+          API.sdrGainOnly({ gain_mode: gainMode, gain_db: value }).then(() => {
+            refreshStatus();
+            pollSdrInfo();
+          }).catch(() => {});
         }
         gainDebounceTimer = null;
       }, 200); // 200ms debounce delay
@@ -3265,6 +3296,13 @@ function init() {
     setInterval(pollSdrHealth, POLL_SDRHEALTH_MS);
     pollSdrHealth();
   }, 2000);
+  
+  // When user returns to this tab (e.g. from ML page), re-check status and reconnect FFT if scan is running
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      refreshStatus();
+    }
+  });
 }
 
 // Kick everything off

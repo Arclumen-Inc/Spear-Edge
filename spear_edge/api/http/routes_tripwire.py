@@ -9,6 +9,7 @@ from spear_edge.core.integrate.tripwire_events import (
     FhssClusterEvent,
     RfEnergyEvent,
     RfSpikeEvent,
+    BearingLineEvent,
 )
 
 class TripwireEvent(BaseModel):
@@ -44,15 +45,89 @@ def bind():
         # -------------------------------------------------
         # Handle special event types that don't trigger captures
         # -------------------------------------------------
-        # AoA cone events are continuous updates - advisory only
+        # Handle nested rf_event format (v2.0 compatibility)
+        # {"type": "rf_event", "event_type": "fhss_cluster", ...}
+        if event_type == "rf_event":
+            nested_type = payload.get("event_type", "")
+            if nested_type:
+                event_type = nested_type
+                print(f"[INGEST] Nested rf_event, actual type: {event_type}")
+        
+        # AoA cone events are continuous updates - advisory only, but used for TAI
         if event_type == "aoa_cone":
-            print("[INGEST] AoA cone event - advisory only, no capture")
-            orch.record_tripwire_cue(payload)
-            orch.bus.publish_nowait("tripwire_cue", payload)
+            node_id = payload.get("node_id") or payload.get("tripwire_id") or "unknown"
+            bearing_deg = payload.get("bearing_deg")
+            
+            # Get callsign from registry if available
+            nodes = orch.tripwires.snapshot()
+            node = next((n for n in nodes if n["node_id"] == node_id), None)
+            callsign = node.get("callsign") if node else payload.get("callsign")
+            
+            # Ensure source_type is set for fusion tracking
+            aoa_data = dict(payload)
+            aoa_data["source_type"] = "aoa_auto"  # Automated AoA from antenna array
+            aoa_data["node_id"] = node_id
+            aoa_data["callsign"] = callsign
+            
+            # Use GPS from payload or node registry
+            if not aoa_data.get("gps"):
+                if node and node.get("gps"):
+                    aoa_data["gps"] = node["gps"]
+            
+            print(f"[INGEST] AoA cone (Auto) from {node_id}: {bearing_deg}° - storing for TAI")
+            orch.record_tripwire_cue(aoa_data)
+            orch.bus.publish_nowait("tripwire_cue", aoa_data)
             return {
                 "accepted": True,
                 "action": "aoa_update",
-                "message": "AoA cone events are advisory only"
+                "source_type": "aoa_auto",
+                "message": "Auto AoA cone stored for triangulation"
+            }
+        
+        # Bearing line events for triangulation - advisory, stored for TAI calculation
+        if event_type == "bearing_line":
+            print("[INGEST] Bearing line event (Manual DF) - storing for triangulation")
+            # Parse into structured event
+            try:
+                bearing_event = BearingLineEvent(**payload)
+                node_id = bearing_event.get_node_id()
+                
+                # Get callsign from registry if available
+                nodes = orch.tripwires.snapshot()
+                node = next((n for n in nodes if n["node_id"] == node_id), None)
+                callsign = node.get("callsign") if node else None
+                
+                # Store bearing data with GPS for triangulation
+                # Mark as manual_df source for fusion tracking
+                bearing_data = {
+                    "type": "bearing_line",
+                    "source_type": "manual_df",  # Manual DF bearing
+                    "node_id": node_id,
+                    "callsign": callsign,
+                    "bearing_deg": bearing_event.bearing_deg,
+                    "confidence": bearing_event.confidence or 0.7,  # Manual DF default confidence
+                    "signal_strength_db": bearing_event.signal_strength_db,
+                    "null_bearing_deg": bearing_event.null_bearing_deg,
+                    "cone_width_deg": bearing_event.cone_width_deg,  # May be None
+                    "bearing_std_deg": bearing_event.bearing_std_deg,  # Will be converted if cone_width missing
+                    "gps": bearing_event.gps,
+                    "timestamp": bearing_event.timestamp,
+                    "signal_freq_mhz": bearing_event.signal_freq_mhz,
+                }
+                # Record as AoA cone for TAI calculation (bearing lines are similar to AoA)
+                orch._record_aoa_cone(bearing_data)
+                print(f"[INGEST] Manual DF bearing from {node_id}: {bearing_event.bearing_deg}° (conf={bearing_event.confidence})")
+            except Exception as e:
+                print(f"[INGEST] Error parsing bearing_line: {e}")
+            
+            orch.record_tripwire_cue(payload)
+            orch.bus.publish_nowait("tripwire_cue", payload)
+            orch.bus.publish_nowait("bearing_line", payload)
+            return {
+                "accepted": True,
+                "action": "bearing_stored",
+                "source_type": "manual_df",
+                "message": "Manual DF bearing stored for triangulation"
             }
         
         # RF energy start/end events are tracking events - advisory only
@@ -254,14 +329,18 @@ def bind():
     @router.get("/aoa-fusion")
     async def get_aoa_fusion(request: Request):
         """
-        Get AoA fusion data: active AoA cones with node GPS positions.
-        Returns cones from up to 3 tripwire nodes for triangulation.
+        Get AoA fusion data: active AoA cones with node GPS positions,
+        and calculated TAI (Targeted Area of Interest) if available.
+        Returns cones from up to 4 tripwire nodes for triangulation.
         """
+        from spear_edge.core.integrate.aoa_fusion import (
+            cones_from_dicts, fuse_bearing_cones, tai_to_dict
+        )
+        
         orch = request.app.state.orchestrator
-        import time
+        now = time.time()
         
         # Get active AoA cones (most recent from each node)
-        now = time.time()
         active_cones = []
         node_ids_seen = set()
         
@@ -282,42 +361,133 @@ def bind():
                 continue
             
             # Ensure node_id is in the cone dict for frontend
-            if "node_id" not in cone:
-                cone = dict(cone)  # Make a copy to avoid modifying original
-                cone["node_id"] = node_id
+            cone_copy = dict(cone)
+            cone_copy["node_id"] = node_id
             
             node_ids_seen.add(node_id)
-            active_cones.append(cone)
+            active_cones.append(cone_copy)
             
-            # Limit to 3 nodes
-            if len(active_cones) >= 3:
+            # Limit to 4 nodes
+            if len(active_cones) >= 4:
                 break
         
-        # Get node GPS positions
+        # Get node GPS positions and add to cones
         nodes = orch.tripwires.snapshot()
         node_map = {n["node_id"]: n for n in nodes}
         
         # Combine cones with node GPS data
         fusion_data = []
+        cones_for_fusion = []
+        
         for cone in active_cones:
             node_id = cone.get("node_id")
             node = node_map.get(node_id)
             
+            # Get GPS from cone or node registry
+            gps = cone.get("gps")
+            if not gps or not gps.get("lat"):
+                gps = node.get("gps") if node else None
+            
+            # Determine source type
+            source_type = cone.get("source_type", "unknown")
+            event_type_hint = cone.get("type") or cone.get("event_type", "")
+            if source_type == "unknown":
+                if event_type_hint == "bearing_line":
+                    source_type = "manual_df"
+                elif event_type_hint == "aoa_cone":
+                    source_type = "aoa_auto"
+            
+            source_labels = {
+                "manual_df": "Manual DF",
+                "aoa_auto": "Auto AoA",
+                "bearing_line": "Bearing Line",
+                "unknown": "Unknown",
+            }
+            
             fusion_item = {
                 "node_id": node_id,
-                "callsign": node.get("callsign", node_id) if node else node_id,
+                "callsign": cone.get("callsign") or (node.get("callsign", node_id) if node else node_id),
                 "bearing_deg": cone.get("bearing_deg"),
-                "cone_width_deg": cone.get("cone_width_deg", 45.0),
+                "cone_width_deg": cone.get("cone_width_deg", 30.0),
+                "bearing_std_deg": cone.get("bearing_std_deg"),  # Include if available
                 "confidence": cone.get("confidence", 0.5),
                 "timestamp": cone.get("timestamp"),
-                "gps": node.get("gps") if node else None,
+                "gps": gps,
+                "source_type": source_type,
+                "source_label": source_labels.get(source_type, "Unknown"),
             }
             fusion_data.append(fusion_item)
+            
+            # Build cone dict for fusion calculation
+            if gps and gps.get("lat") and cone.get("bearing_deg") is not None:
+                cones_for_fusion.append({
+                    "node_id": node_id,
+                    "callsign": fusion_item["callsign"],
+                    "gps": gps,
+                    "bearing_deg": cone.get("bearing_deg"),
+                    "cone_width_deg": cone.get("cone_width_deg"),  # May be None, fusion will handle
+                    "bearing_std_deg": cone.get("bearing_std_deg"),  # Alternative uncertainty
+                    "confidence": cone.get("confidence", 0.5),
+                    "timestamp": cone.get("timestamp", 0),
+                    "source_type": source_type,
+                    "type": event_type_hint,  # For source inference
+                })
+        
+        # Calculate TAI if we have enough cones
+        tai_result = None
+        if len(cones_for_fusion) >= 2:
+            try:
+                bearing_cones = cones_from_dicts(cones_for_fusion)
+                if len(bearing_cones) >= 2:
+                    tai = fuse_bearing_cones(bearing_cones)
+                    if tai.valid:
+                        tai_result = tai_to_dict(tai)
+            except Exception as e:
+                print(f"[AOA-FUSION] Error calculating TAI: {e}")
+        
+        # Summarize sources
+        sources_summary = {}
+        for cone in fusion_data:
+            src = cone.get("source_type", "unknown")
+            sources_summary[src] = sources_summary.get(src, 0) + 1
         
         return {
             "cones": fusion_data,
             "count": len(fusion_data),
-            "timestamp": now
+            "sources_summary": sources_summary,
+            "timestamp": now,
+            "tai": tai_result,
+        }
+    
+    @router.get("/tai")
+    async def get_tai(request: Request):
+        """
+        Get the current TAI (Targeted Area of Interest) result.
+        Returns the most recent triangulation result if available.
+        """
+        orch = request.app.state.orchestrator
+        
+        # Check if we have a recent TAI
+        tai_dict = getattr(orch, "_last_tai_dict", None)
+        tai_ts = getattr(orch, "_last_tai_ts", 0)
+        
+        if tai_dict is None:
+            return {
+                "valid": False,
+                "error": "No TAI calculated yet",
+                "timestamp": None,
+            }
+        
+        # Check staleness (TAI older than 60 seconds is stale)
+        now = time.time()
+        stale = (now - tai_ts) > 60
+        
+        return {
+            "valid": tai_dict.get("valid", False) and not stale,
+            "stale": stale,
+            "age_s": now - tai_ts,
+            "timestamp": tai_ts,
+            **tai_dict,
         }
 
     @router.post("/scan-plan")
@@ -325,7 +495,9 @@ def bind():
         """
         Send scan plan command to a specific tripwire node.
         Forwards the command via WebSocket if the node is connected.
+        Includes command_id for response correlation per Tripwire v2.0 spec.
         """
+        import uuid
         orch = request.app.state.orchestrator
         node_id = payload.get("node_id")
         scan_plan = payload.get("scan_plan")
@@ -354,26 +526,78 @@ def bind():
                 "detail": f"Node {node_id} is not connected"
             }
         
-        # Send scan plan command via WebSocket
+        # Generate command_id for response correlation
+        command_id = f"cmd-{uuid.uuid4().hex[:12]}"
+        
+        # Initialize pending commands tracking if not exists
+        if not hasattr(orch, "_pending_commands"):
+            orch._pending_commands = {}
+        
+        # Track pending command
+        orch._pending_commands[command_id] = {
+            "node_id": node_id,
+            "action": "set_scan_plan",
+            "scan_plan": scan_plan,
+            "sent_at": time.time(),
+            "status": "pending",
+            "response": None,
+            "completed_at": None,
+        }
+        
+        # Send scan plan command via WebSocket (v2.0 format with command_id)
         import json
         try:
             msg = {
                 "type": "set_scan_plan",
-                "scan_plan": scan_plan
+                "scan_plan": scan_plan,
+                "command_id": command_id,
             }
             await ws.send_text(json.dumps(msg))
-            print(f"[TRIPWIRE] Sent scan plan {scan_plan} to {node_id}")
+            print(f"[TRIPWIRE] Sent scan plan {scan_plan} to {node_id} (command_id={command_id})")
             return {
                 "ok": True,
                 "node_id": node_id,
-                "scan_plan": scan_plan
+                "scan_plan": scan_plan,
+                "command_id": command_id,
             }
         except Exception as e:
             print(f"[TRIPWIRE] Error sending scan plan to {node_id}: {e}")
+            # Mark command as failed
+            orch._pending_commands[command_id]["status"] = "send_failed"
+            orch._pending_commands[command_id]["completed_at"] = time.time()
             return {
                 "ok": False,
                 "error": "send_failed",
-                "detail": str(e)
+                "detail": str(e),
+                "command_id": command_id,
             }
+    
+    @router.get("/command/{command_id}")
+    async def get_command_status(command_id: str, request: Request):
+        """
+        Get status of a pending command by command_id.
+        """
+        orch = request.app.state.orchestrator
+        
+        if not hasattr(orch, "_pending_commands"):
+            return {
+                "ok": False,
+                "error": "not_found",
+                "detail": "No pending commands"
+            }
+        
+        command = orch._pending_commands.get(command_id)
+        if not command:
+            return {
+                "ok": False,
+                "error": "not_found",
+                "detail": f"Command {command_id} not found"
+            }
+        
+        return {
+            "ok": True,
+            "command_id": command_id,
+            **command
+        }
 
     return router

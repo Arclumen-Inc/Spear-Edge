@@ -128,6 +128,9 @@ class PyTorchRfClassifier:
             print(f"[PyTorch] GPU: {torch.cuda.get_device_name(0)}")
             print(f"[PyTorch] CUDA version: {torch.version.cuda}")
         
+        # Store model path for API access
+        self.model_path = str(model_path) if model_path else None
+        
         # Load or create model
         # Create model on CPU first (more reliable for loading)
         if model_path and Path(model_path).exists():
@@ -163,6 +166,8 @@ class PyTorchRfClassifier:
                 print(f"[PyTorch] Model file not found: {model_path}")
             print(f"[PyTorch] Creating new model with {num_classes} classes")
             self.model = RFClassifier(num_classes=num_classes)
+            # No model_path for newly created models
+            self.model_path = None
         
         # Set to eval mode first
         self.model.eval()

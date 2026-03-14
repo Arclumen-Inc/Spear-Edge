@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from fastapi import FastAPI, WebSocket
@@ -43,6 +44,7 @@ from spear_edge.core.gps.gpsd import GpsdClient
 from spear_edge.api.ws.tripwire_link_ws import tripwire_link_ws
 
 from spear_edge.api.http.routes_capture import bind as bind_capture
+from spear_edge.api.http.routes_ml import router as ml_router
 
 # ------------------------------------------------------------
 # SDR factory (native libbladerf only)
@@ -100,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(bind_tripwire())
     app.include_router(bind_edge_mode())
     app.include_router(bind_capture(orchestrator))
+    app.include_router(ml_router)
     app.include_router(network_router)
     # --------------------------------------------------------
     # WEBSOCKET ROUTES (⚠️ MUST COME BEFORE StaticFiles)
@@ -115,6 +118,37 @@ def create_app() -> FastAPI:
     @app.websocket("/ws/tripwire_link")
     async def ws_tripwire_link(websocket: WebSocket):
         await tripwire_link_ws(websocket, app.state.orchestrator)
+    
+    @app.websocket("/ws/tripwire")
+    async def ws_tripwire(websocket: WebSocket):
+        """Alias for /ws/tripwire_link - matches Tripwire v2.0 integration doc."""
+        await tripwire_link_ws(websocket, app.state.orchestrator)
+    
+    # --------------------------------------------------------
+    # FAVICON HANDLER (prevent 404 warnings)
+    # --------------------------------------------------------
+    @app.get("/favicon.ico")
+    async def favicon():
+        from fastapi.responses import Response
+        # Return empty response to suppress browser requests
+        return Response(content=b"", media_type="image/x-icon")
+    
+    # --------------------------------------------------------
+    # ML DASHBOARD ROUTE
+    # --------------------------------------------------------
+    @app.get("/ml")
+    async def ml_dashboard():
+        from fastapi.responses import FileResponse
+        from pathlib import Path
+        
+        # Use same path as StaticFiles mount (relative to project root)
+        ml_html_path = Path("spear_edge/ui/web/ml.html")
+        
+        if ml_html_path.exists():
+            return FileResponse(str(ml_html_path.resolve()), media_type="text/html")
+        else:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=f"ML dashboard not found at {ml_html_path.resolve()}")
         
     # --------------------------------------------------------
     # STATIC UI (⚠️ MUST BE LAST)
@@ -139,10 +173,24 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _shutdown():
-        orchestrator._send_atak_status(online=False)
-        if hasattr(capture_manager, "stop"):
-            await capture_manager.stop()
-        await orchestrator.close()
+        shutdown_timeout_s = 15.0
+        try:
+            orchestrator._send_atak_status(online=False)
+        except Exception:
+            pass
+        try:
+            if hasattr(capture_manager, "stop"):
+                await asyncio.wait_for(capture_manager.stop(), timeout=shutdown_timeout_s)
+        except asyncio.TimeoutError:
+            logging.warning("[SHUTDOWN] capture_manager.stop() timed out")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(orchestrator.close(), timeout=shutdown_timeout_s)
+        except asyncio.TimeoutError:
+            logging.warning("[SHUTDOWN] orchestrator.close() timed out")
+        except Exception:
+            pass
 
     return app
 

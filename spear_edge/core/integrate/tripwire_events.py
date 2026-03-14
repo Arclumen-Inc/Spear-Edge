@@ -126,13 +126,47 @@ class DfBearingEvent(BaseModel):
         allow_population_by_field_name = True
 
 
+class BearingLineEvent(BaseModel):
+    """
+    Manual DF Bearing Line for triangulation.
+    Per Tripwire v2.0 Integration Guide.
+    """
+    type: str = Field(default="bearing_line", alias="event_type")
+    tripwire_id: Optional[str] = None
+    node_id: Optional[str] = None  # Alias for tripwire_id
+    bearing_deg: float
+    confidence: Optional[float] = None
+    signal_strength_db: Optional[float] = None
+    null_bearing_deg: Optional[float] = None
+    cone_width_deg: Optional[float] = None
+    gps: Optional[Dict[str, Any]] = None
+    timestamp: float
+    signal_freq_mhz: Optional[float] = None
+    bearing_std_deg: Optional[float] = None
+    
+    class Config:
+        allow_population_by_field_name = True
+    
+    def get_node_id(self) -> str:
+        """Get node identifier (supports both tripwire_id and node_id)."""
+        return self.tripwire_id or self.node_id or "unknown"
+
+
 def parse_tripwire_event(data: Dict[str, Any]) -> BaseModel:
     """
     Parse a Tripwire event dict into the appropriate Pydantic model.
     
     Supports both 'type' and 'event_type' fields for backward compatibility.
+    Also handles nested rf_event format: {"type": "rf_event", "event_type": "fhss_cluster", ...}
     """
     event_type = data.get("type") or data.get("event_type", "")
+    
+    # Handle nested rf_event format (v2.0 compatibility)
+    # {"type": "rf_event", "event_type": "fhss_cluster", ...}
+    if event_type == "rf_event":
+        nested_type = data.get("event_type", "")
+        if nested_type:
+            event_type = nested_type
     
     # Map event types to models
     if event_type == "rf_cue":
@@ -151,6 +185,8 @@ def parse_tripwire_event(data: Dict[str, Any]) -> BaseModel:
         return DfMetricsEvent(**data)
     elif event_type == "df_bearing":
         return DfBearingEvent(**data)
+    elif event_type == "bearing_line":
+        return BearingLineEvent(**data)
     else:
         # Unknown event type - return as generic dict
         # This maintains backward compatibility with v1.1 events

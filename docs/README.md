@@ -12,6 +12,7 @@ Welcome to the SPEAR-Edge documentation. This directory contains comprehensive t
 - **[Hardware Guide](HARDWARE_GUIDE.md)** - bladeRF configuration, calibration, and hardware constraints
 - **[Ingest Service](INGEST_SERVICE.md)** - Tripwire event ingestion service (port 8000)
 - **[Performance Analysis](PERFORMANCE_ANALYSIS.md)** - Performance bottlenecks and optimization strategies
+- **[ML Dashboard](ML_DASHBOARD.md)** - ML model management and capture labeling interface
 - **[Changelog](CHANGELOG.md)** - Version history and changes
 
 ## Quick Start

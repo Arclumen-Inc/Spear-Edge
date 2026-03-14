@@ -9,10 +9,19 @@ def health():
 
 @router.get("/status")
 def status():
+    scan_running = False
+    mode = "manual"
+    try:
+        if getattr(state, "engine", None) is not None:
+            scan_running = state.engine.status().get("scan_running", False)
+            mode = getattr(state.engine, "mode", "manual")
+    except Exception:
+        pass
     return {
         "ok": True,
-        "mode": getattr(state, "edge_mode", "manual"),
+        "mode": mode,
         "sdr_open": state.sdr is not None,
+        "scan_running": scan_running,
         "gps": state.gps.get_status() if state.gps else None,
     }
 

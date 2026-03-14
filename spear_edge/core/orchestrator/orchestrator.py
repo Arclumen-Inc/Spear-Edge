@@ -122,8 +122,7 @@ class Orchestrator:
         # Capture Manager
         # ----------------------------------------
         self.capture_mgr = CaptureManager(orchestrator=self)
-        # Hook up callbacks for classification + ATAK alerting
-        self.capture_mgr.on_result = self._on_capture_result
+        # Hook up log callback (classification/ATAK handled via event bus subscription)
         self.capture_mgr.on_log = self._log_capture_result
         # Start the capture worker if it has a start method
         if hasattr(self.capture_mgr, "start"):
@@ -223,19 +222,35 @@ class Orchestrator:
             ring_size = int(sample_rate_sps * ring_duration)
             self._ring = IQRingBuffer(ring_size)
 
-            # Aim for ~10–20 ms of samples per read (optimized for high rates)
-            # For high sample rates (>20 MS/s), use larger chunks to reduce overhead
-            if sample_rate_sps > 20_000_000:
-                chunk_duration_ms = 0.015  # 15ms for high rates
+            # Aim for ~8–12 ms of samples per read (conservative to match USB buffer sizes)
+            # Read sizes must be SMALLER than USB buffer size to prevent timeouts
+            # New conservative buffer sizes:
+            #   >40 MS/s: 256K samples buffer → use 128K-192K read size
+            #   20-40 MS/s: 128K samples buffer → use 64K-96K read size
+            #   10-20 MS/s: 64K samples buffer → use 32K-48K read size
+            #   <10 MS/s: 32K samples buffer → use 16K-24K read size
+            if sample_rate_sps > 40_000_000:
+                chunk_duration_ms = 0.008  # 8ms for very high rates (60 MS/s = 480k samples, clamp to 192K)
+            elif sample_rate_sps > 20_000_000:
+                chunk_duration_ms = 0.010  # 10ms for high rates (30 MS/s = 300k samples, clamp to 96K)
+            elif sample_rate_sps > 10_000_000:
+                chunk_duration_ms = 0.012  # 12ms for medium rates (15 MS/s = 180k samples, clamp to 48K)
             else:
-                chunk_duration_ms = 0.02  # 20ms for normal rates
+                chunk_duration_ms = 0.015  # 15ms for normal rates (2.4 MS/s = 36k samples, clamp to 24K)
             
             chunk = int(sample_rate_sps * chunk_duration_ms)
 
-            # Adaptive clamping: higher max for high sample rates
-            chunk = max(chunk, 32768)
-            # For rates > 20 MS/s, allow up to 1M samples (supports 30-40 MS/s)
-            max_chunk = 1048576 if sample_rate_sps > 20_000_000 else 262144
+            # Adaptive clamping: ensure read size is smaller than buffer size
+            chunk = max(chunk, 16384)  # Minimum 16K samples
+            # Clamp to be safely smaller than buffer sizes (use ~75% of buffer size)
+            if sample_rate_sps > 40_000_000:
+                max_chunk = 196608  # 192K (75% of 256K buffer)
+            elif sample_rate_sps > 20_000_000:
+                max_chunk = 98304  # 96K (75% of 128K buffer)
+            elif sample_rate_sps > 10_000_000:
+                max_chunk = 49152  # 48K (75% of 64K buffer)
+            else:
+                max_chunk = 24576  # 24K (75% of 32K buffer)
             chunk = min(chunk, max_chunk)
 
             self._rx_task = RxTask(
@@ -283,6 +298,17 @@ class Orchestrator:
 
             self._scan.subscribe(_on_frame)
             await self._scan.start()
+
+    async def set_fft_smoothing(self, alpha: float) -> None:
+        """
+        Set FFT smoothing alpha value (0.0 to 1.0).
+        Lower values = more smoothing, higher values = less smoothing.
+        Default: 0.1 (good for wideband signals like VTX).
+        """
+        async with self._lock:
+            if self._scan and self._scan.is_running():
+                await self._scan.set_smoothing(alpha)
+                print(f"[ORCH] FFT smoothing set to {alpha:.3f}")
 
     async def stop_scan(self) -> None:
         async with self._lock:
@@ -344,10 +370,28 @@ class Orchestrator:
         except Exception:
             pass
 
-        # Notify connected tripwires (WS)
+        # Notify connected tripwires (WS) with v2.0 format
         links = getattr(self, "tripwire_links", None)
         if isinstance(links, dict):
-            msg = {"type": "edge_state", "mode": self.mode}
+            # Build active_nodes list
+            active_nodes = []
+            nodes = self.tripwires.snapshot()
+            now = time.time()
+            for node in nodes:
+                last_seen = node.get("last_seen", 0)
+                if (now - last_seen) < CONNECTED_SECS:
+                    active_nodes.append(node.get("node_id", "unknown"))
+            
+            # Count TAIs
+            tai_count = len(getattr(self, "aoa_cones", []))
+            
+            msg = {
+                "type": "edge_state",
+                "mode": self.mode,
+                "active_nodes": active_nodes,
+                "tai_count": tai_count,
+                "timestamp": now,
+            }
             for _node, ws in list(links.items()):
                 try:
                     # fire-and-forget
@@ -409,10 +453,12 @@ class Orchestrator:
 
     def _update_tai_if_ready(self) -> None:
         """
-        Calculate TAI from active AoA cones and send to ATAK if we have 2+ cones with GPS.
+        Calculate TAI from active AoA cones using proper geometric triangulation.
+        Sends TAI to ATAK and publishes to event bus if we have 2+ cones with GPS.
         """
-        import time
-        from spear_edge.core.integrate.tripwire_events import AoaConeEvent
+        from spear_edge.core.integrate.aoa_fusion import (
+            cones_from_dicts, fuse_bearing_cones, tai_to_dict
+        )
         
         now = time.time()
         
@@ -434,130 +480,123 @@ class Orchestrator:
             if now - cone_timestamp > 60:
                 continue
             
-            # Must have GPS and bearing
-            if not cone.get("bearing_deg") is not None:
+            # Must have bearing
+            if cone.get("bearing_deg") is None:
                 continue
             
-            # Get node GPS from registry
-            nodes = self.tripwires.snapshot()
-            node = next((n for n in nodes if n["node_id"] == node_id), None)
-            if not node or not node.get("gps") or not node["gps"].get("lat"):
-                continue
+            # Get node GPS from registry (or use GPS in cone if present)
+            gps = cone.get("gps")
+            if not gps or not gps.get("lat"):
+                nodes = self.tripwires.snapshot()
+                node = next((n for n in nodes if n["node_id"] == node_id), None)
+                if not node or not node.get("gps") or not node["gps"].get("lat"):
+                    continue
+                gps = node["gps"]
             
-            # Add GPS to cone data
+            # Build cone dict with GPS
             cone_with_gps = dict(cone)
-            cone_with_gps["gps"] = node["gps"]
+            cone_with_gps["gps"] = gps
+            cone_with_gps["node_id"] = node_id
             
             node_ids_seen.add(node_id)
             active_cones.append(cone_with_gps)
             
-            if len(active_cones) >= 3:
+            # Limit to 4 cones max for performance
+            if len(active_cones) >= 4:
                 break
         
         # Need at least 2 cones for triangulation
         if len(active_cones) < 2:
             return
         
-        # Calculate intersections
-        intersections = []
-        for i in range(len(active_cones)):
-            for j in range(i + 1, len(active_cones)):
-                cone1 = active_cones[i]
-                cone2 = active_cones[j]
+        # Convert to BearingCone objects and run fusion
+        try:
+            cones = cones_from_dicts(active_cones)
+            if len(cones) < 2:
+                print("[TAI] Not enough valid cones for fusion")
+                return
+            
+            tai = fuse_bearing_cones(cones)
+            
+            if not tai.valid:
+                print(f"[TAI] Fusion failed: {tai.error_message}")
+                return
+            
+            # Store last TAI result for API access
+            self._last_tai = tai
+            self._last_tai_dict = tai_to_dict(tai)
+            self._last_tai_ts = now
+            
+            # Publish TAI to event bus
+            self.bus.publish_nowait("tai_update", {
+                "tai": self._last_tai_dict,
+                "active_cones": len(cones),
+                "ts": now,
+            })
+            
+            # Calculate quality for ATAK (based on GDOP and confidence)
+            # Lower GDOP = better, so invert it for quality score
+            quality = tai.confidence * (1.0 / max(tai.gdop, 1.0))
+            quality = min(1.0, max(0.0, quality))
+            
+            # Send to ATAK (throttle to once per 5 seconds)
+            if not hasattr(self, "_last_tai_send") or (now - self._last_tai_send) > 5.0:
+                # Build polygon vertices for visualization
+                polygon_vertices = None
+                if tai.polygon and len(tai.polygon) >= 3:
+                    polygon_vertices = [(p.lat, p.lon) for p in tai.polygon]
                 
-                # Calculate intersection (simplified - using bearing lines)
-                # This is a simplified calculation - full implementation would use proper triangulation
-                lat1 = cone1["gps"]["lat"]
-                lon1 = cone1["gps"]["lon"]
-                bearing1 = cone1["bearing_deg"]
-                lat2 = cone2["gps"]["lat"]
-                lon2 = cone2["gps"]["lon"]
-                bearing2 = cone2["bearing_deg"]
+                # Send TAI with circle and polygon
+                self.cot.send_tai(
+                    tai.centroid.lat,
+                    tai.centroid.lon,
+                    tai.radius_m,
+                    tai.confidence,
+                    quality,
+                    polygon_vertices=polygon_vertices,
+                )
                 
-                # Simple intersection calculation (for now - could be improved)
-                # This is a placeholder - proper implementation would use spherical geometry
-                try:
-                    # Use a simplified approach: calculate point along bearing from each node
-                    # and find intersection (this is approximate)
-                    import math
-                    R = 6371000  # Earth radius in meters
+                # Send bearing lines from each contributing sensor
+                bearing_data = []
+                for cone_data in active_cones:
+                    gps = cone_data.get("gps", {})
+                    if gps.get("lat") and gps.get("lon") and cone_data.get("bearing_deg") is not None:
+                        bearing_data.append({
+                            "node_id": cone_data.get("node_id", "unknown"),
+                            "callsign": cone_data.get("callsign"),
+                            "lat": gps["lat"],
+                            "lon": gps["lon"],
+                            "bearing_deg": cone_data["bearing_deg"],
+                            "confidence": cone_data.get("confidence", 0.5),
+                        })
+                
+                if bearing_data:
+                    # Calculate range for bearing lines (distance to TAI center)
+                    from spear_edge.core.integrate.aoa_fusion import distance_m, GeoPoint
+                    max_range = 5000  # Default 5km
+                    for b in bearing_data:
+                        try:
+                            dist = distance_m(
+                                GeoPoint(lat=b["lat"], lon=b["lon"]),
+                                GeoPoint(lat=tai.centroid.lat, lon=tai.centroid.lon)
+                            )
+                            max_range = max(max_range, dist * 1.5)  # Extend past TAI
+                        except Exception:
+                            pass
                     
-                    # Convert to radians
-                    lat1_rad = math.radians(lat1)
-                    lon1_rad = math.radians(lon1)
-                    lat2_rad = math.radians(lat2)
-                    lon2_rad = math.radians(lon2)
-                    brg1_rad = math.radians(bearing1)
-                    brg2_rad = math.radians(bearing2)
-                    
-                    # Calculate intersection using plane approximation (for small distances)
-                    # This is simplified - full implementation would use great circle intersection
-                    d_lat = lat2_rad - lat1_rad
-                    d_lon = lon2_rad - lon1_rad
-                    
-                    # Approximate intersection (simplified)
-                    # For proper implementation, use Vincenty's formula or similar
-                    # For now, use midpoint as approximation when bearings are close
-                    if abs(bearing1 - bearing2) > 5:  # Only if bearings differ significantly
-                        # Simplified: use average of node positions weighted by confidence
-                        conf1 = cone1.get("confidence", 0.5)
-                        conf2 = cone2.get("confidence", 0.5)
-                        total_conf = conf1 + conf2
-                        if total_conf > 0:
-                            avg_lat = (lat1 * conf1 + lat2 * conf2) / total_conf
-                            avg_lon = (lon1 * conf1 + lon2 * conf2) / total_conf
-                            intersections.append({"lat": avg_lat, "lon": avg_lon})
-                except Exception as e:
-                    print(f"[TAI] Error calculating intersection: {e}")
-                    continue
+                    self.cot.send_bearing_lines(bearing_data, range_m=max_range)
+                
+                self._last_tai_send = now
+                
+                print(f"[TAI] Triangulation: center=({tai.centroid.lat:.6f}, {tai.centroid.lon:.6f}), "
+                      f"radius={tai.radius_m:.0f}m, area={tai.area_m2:.0f}m², "
+                      f"GDOP={tai.gdop:.2f}, confidence={tai.confidence:.2f}, "
+                      f"polygon_vertices={len(tai.polygon)}, bearings={len(bearing_data)}")
         
-        if not intersections:
-            return
-        
-        # Average intersections for TAI center
-        avg_lat = sum(p["lat"] for p in intersections) / len(intersections)
-        avg_lon = sum(p["lon"] for p in intersections) / len(intersections)
-        
-        # Calculate TAI radius and quality metrics
-        avg_confidence = sum(c.get("confidence", 0.5) for c in active_cones) / len(active_cones)
-        avg_cone_width = sum(c.get("cone_width_deg", 45) for c in active_cones) / len(active_cones)
-        
-        # Estimate radius in meters (simplified - based on cone widths and distances)
-        # Average distance between nodes
-        import math
-        distances = []
-        for i in range(len(active_cones)):
-            for j in range(i + 1, len(active_cones)):
-                lat1 = active_cones[i]["gps"]["lat"]
-                lon1 = active_cones[i]["gps"]["lon"]
-                lat2 = active_cones[j]["gps"]["lat"]
-                lon2 = active_cones[j]["gps"]["lon"]
-                dlat = math.radians(lat2 - lat1)
-                dlon = math.radians(lon2 - lon1)
-                a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-                distance_m = 6371000 * c
-                distances.append(distance_m)
-        
-        avg_distance = sum(distances) / len(distances) if distances else 1000
-        
-        # Estimate radius based on cone width and confidence
-        # Wider cones and lower confidence = larger radius
-        base_radius = avg_distance * 0.1  # 10% of average node distance
-        width_factor = 1.0 + (avg_cone_width / 90.0)  # 45deg = 1.5x, 90deg = 2x
-        confidence_factor = 1.0 + (1.0 - avg_confidence) * 2.0  # Low conf = 3x, high conf = 1x
-        radius_m = base_radius * width_factor * confidence_factor
-        
-        # Clamp radius
-        radius_m = max(50, min(5000, radius_m))  # 50m to 5km
-        
-        # Calculate quality
-        quality = avg_confidence * (1.0 - min(avg_cone_width / 90.0, 0.5))  # Simplified quality
-        
-        # Send to ATAK (throttle to once per 5 seconds)
-        if not hasattr(self, "_last_tai_send") or (now - self._last_tai_send) > 5.0:
-            self.cot.send_tai(avg_lat, avg_lon, radius_m, avg_confidence, quality)
-            self._last_tai_send = now
+        except Exception as e:
+            print(f"[TAI] Error during fusion: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _freq_bin(self, freq_hz: float) -> int:
         b = int(self.auto_policy.freq_bin_hz)
@@ -801,40 +840,66 @@ class Orchestrator:
 
     def _on_capture_result(self, res):
         """
-        Capture completed → classify → ATAK alert
+        Capture completed → read classification → ATAK alert
         
-        Per Tripwire v1.1 alignment:
-        - Only forward confirmed events (stage="confirmed") to ATAK
+        Per Tripwire v1.1 and v2.0 alignment:
+        - v1.1: Only forward confirmed events (stage="confirmed") to ATAK
+        - v2.0: fhss_cluster events are actionable (no stage field)
         - Cues are advisory only and never forwarded
         - Edge is the authority; Tripwire does not assert intent or threat
+        - Uses classification from capture_manager (already done, stored in capture.json)
         """
         try:
-            # ATAK forwarding eligibility: only confirmed events
-            # Per Tripwire v1.1: cues are advisory only, not actionable
-            stage = getattr(res, "stage", None)
-            if stage != "confirmed":
-                # Not eligible for ATAK forwarding - log but don't forward
-                print(f"[ATAK] Skipping ATAK forward - stage={stage} (only confirmed events forwarded)")
+            # ATAK forwarding eligibility check
+            # Read event_type from capture.json to determine v2.0 actionable events
+            import json
+            from pathlib import Path
+            
+            meta_path = Path(res.meta_path)
+            if not meta_path.exists():
+                print(f"[ATAK] Warning: capture.json not found at {meta_path}, skipping ATAK message")
                 return
             
-            capture = {
-                "iq_path": res.iq_path,
-                "meta": {
-                    "freq_hz": res.freq_hz,
-                    "sample_rate_sps": res.sample_rate_sps,
-                    "duration_s": res.duration_s,
-                }
-            }
-
-            result = self.classifier.classify_capture(capture)
-
-            label = result.get("primary_label", "unknown")
-            confidence = float(result.get("confidence", 0.0))
+            with open(meta_path, 'r') as f:
+                capture_data = json.load(f)
+            
+            # Check ATAK forwarding eligibility
+            # v1.1: requires stage="confirmed"
+            # v2.0: fhss_cluster and confirmed_event are actionable even without stage
+            stage = getattr(res, "stage", None)
+            event_type = None
+            if capture_data.get("request"):
+                meta = capture_data["request"].get("meta", {})
+                if meta:
+                    event_type = meta.get("type") or meta.get("event_type")
+            
+            # v2.0 actionable event types (no stage field needed)
+            v2_actionable_types = {"fhss_cluster", "confirmed_event"}
+            
+            is_v1_confirmed = (stage == "confirmed")
+            is_v2_actionable = (event_type in v2_actionable_types)
+            
+            if not is_v1_confirmed and not is_v2_actionable:
+                # Not eligible for ATAK forwarding - log but don't forward
+                print(f"[ATAK] Skipping ATAK forward - stage={stage}, event_type={event_type} (not actionable)")
+                return
+            
+            # Get classification from capture.json (already loaded above)
+            classification = capture_data.get("classification")
+            if not classification:
+                print(f"[ATAK] No classification in capture.json, skipping ATAK message")
+                return
+            
+            label = classification.get("label", "unknown")
+            confidence = float(classification.get("confidence", 0.0))
             freq_mhz = res.freq_hz / 1e6
 
+            # Get human-readable name if available
+            device_name = classification.get("device_name", label.upper())
+            
             # Human-readable label only (no raw RF metrics per alignment doc)
             msg = (
-                f"{label.upper()} detected @ "
+                f"{device_name} detected @ "
                 f"{freq_mhz:.3f} MHz "
                 f"(confidence {confidence:.2f})"
             )
@@ -842,21 +907,13 @@ class Orchestrator:
             self.cot.send_chat(msg)
             xml = self.cot.build_detection_marker(msg)
             self.cot.send_event(xml)
-
-            self.bus.publish_nowait(
-                "classification_result",
-                {
-                    "label": label,
-                    "confidence": confidence,
-                    "freq_hz": res.freq_hz,
-                    "source_node": res.source_node,
-                    "scan_plan": res.scan_plan,
-                    "ts": res.ts,
-                }
-            )
+            
+            print(f"[ATAK] Classification sent to ATAK: {msg}")
 
         except Exception as e:
-            print("[SPEAR-EDGE][CLASSIFY ERROR]", e)
+            print(f"[ATAK] Error sending classification to ATAK: {e}")
+            import traceback
+            traceback.print_exc()
 
     # -------------------------------------------------
     # ATAK Status Messages
@@ -922,7 +979,7 @@ class Orchestrator:
         print(f"[ATAK] Capture start: {msg}")
 
     def _setup_tripwire_status_updates(self):
-        """Subscribe to tripwire_nodes and capture_start events for ATAK status updates"""
+        """Subscribe to tripwire_nodes, capture_start, and capture_result events for ATAK updates"""
         async def _watch_tripwire_nodes():
             try:
                 queue = await self.bus.subscribe("tripwire_nodes", maxsize=50)
@@ -947,6 +1004,21 @@ class Orchestrator:
             except Exception as e:
                 print(f"[ATAK] Error subscribing to capture_start: {e}")
         
+        async def _watch_capture_result():
+            """Subscribe to capture_result events to send classifications to ATAK"""
+            try:
+                queue = await self.bus.subscribe("capture_result", maxsize=50)
+                while True:
+                    try:
+                        res = await queue.get()
+                        # res is a CaptureResult dataclass
+                        self._on_capture_result(res)
+                    except Exception as e:
+                        print(f"[ATAK] Error processing capture_result event: {e}")
+            except Exception as e:
+                print(f"[ATAK] Error subscribing to capture_result: {e}")
+        
         # Start background tasks to watch for events
         asyncio.create_task(_watch_tripwire_nodes())
         asyncio.create_task(_watch_capture_start())
+        asyncio.create_task(_watch_capture_result())

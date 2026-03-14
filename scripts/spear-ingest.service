@@ -1,0 +1,28 @@
+[Unit]
+Description=SPEAR Ingest server (Tripwire events)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=spear
+Group=spear
+WorkingDirectory=/home/spear/spear-edgev1_0
+
+Environment=PYTHONUNBUFFERED=1
+Environment=SPEAR_LOG_LEVEL=INFO
+
+ExecStart=/home/spear/spear-edgev1_0/venv/bin/uvicorn spear_edge.ingest_app:app --host 0.0.0.0 --port 8000
+
+# Graceful shutdown settings
+TimeoutStopSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
