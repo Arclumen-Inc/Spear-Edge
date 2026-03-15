@@ -89,6 +89,26 @@ canvas {
   background: transparent;
 }
 
+/* FFT hover tooltip: frequency + power at cursor */
+.fft-tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 1000;
+  padding: 4px 8px;
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--accent-green);
+  background: rgba(11, 15, 20, 0.92);
+  border: 1px solid var(--accent-green-dim);
+  border-radius: 6px;
+  white-space: nowrap;
+  visibility: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.fft-tooltip.visible {
+  visibility: visible;
+}
+
 .y-axis-label {
   position: absolute;
   left: -42px;

@@ -208,6 +208,7 @@ let edgeMode            = "manual"; // manual | armed | tasked
 let activeTask          = null;
 
 let lastSpectrum        = null;
+let lastFftFrame        = null;  // Latest FFT frame for hover tooltip (freq + power)
 let smoothedNoiseFloor  = null;
 
 // Trace mode state
@@ -769,12 +770,22 @@ function drawSpectrum(frame) {
   // Guard: must have at least a few bins
   // Fix: Float32Array is NOT an Array, so use length check instead of Array.isArray
   if (!ctx || !canvas || !frame.power_dbfs || frame.power_dbfs.length < 8) return;
-  
+
   if (canvas.width < 50 || canvas.height < 50) {
     resizeCanvas(true);
     return;
   }
-  
+
+  // Store latest frame for FFT hover tooltip (frequency + power at cursor)
+  const nBins = frame.power_dbfs.length;
+  const powerArr = frame.power_inst_dbfs || frame.power_dbfs;
+  lastFftFrame = {
+    center_freq_hz: frame.center_freq_hz,
+    sample_rate_sps: frame.sample_rate_sps,
+    fft_size: nBins,
+    power_arr: powerArr && powerArr.length === nBins ? powerArr : frame.power_dbfs,
+  };
+
   // Compute device-space coordinates once
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth;
@@ -3140,6 +3151,48 @@ function init() {
   // INIT AoA FUSION VISUALIZATION
   // -------------------------------------------------
   startAoAFusionUpdates();
+
+  // -------------------------------------------------
+  // INIT FFT HOVER TOOLTIP (frequency + power at cursor)
+  // -------------------------------------------------
+  const fftTooltipEl = document.createElement("div");
+  fftTooltipEl.className = "fft-tooltip";
+  fftTooltipEl.setAttribute("aria-hidden", "true");
+  document.body.appendChild(fftTooltipEl);
+
+  if (canvas) {
+    canvas.addEventListener("mousemove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const normX = x / (rect.width || 1);
+      if (!lastFftFrame || !Number.isFinite(lastFftFrame.center_freq_hz) || !Number.isFinite(lastFftFrame.sample_rate_sps)) {
+        fftTooltipEl.classList.remove("visible");
+        return;
+      }
+      const cf = lastFftFrame.center_freq_hz;
+      const sr = lastFftFrame.sample_rate_sps;
+      const n = lastFftFrame.fft_size || 1;
+      const fHz = cf + (normX - 0.5) * sr;
+      const mhz = fHz / 1e6;
+      let text = mhz.toFixed(3) + " MHz";
+      if (lastFftFrame.power_arr && lastFftFrame.power_arr.length === n) {
+        const bin = Math.max(0, Math.min(n - 1, Math.round(normX * (n - 1))));
+        const p = lastFftFrame.power_arr[bin];
+        if (Number.isFinite(p)) {
+          const units = (typeof globalPowerUnits === "string" && globalPowerUnits) ? globalPowerUnits : "dBFS";
+          text += "  " + p.toFixed(1) + " " + units;
+        }
+      }
+      fftTooltipEl.textContent = text;
+      fftTooltipEl.style.left = (e.clientX + 12) + "px";
+      fftTooltipEl.style.top = (e.clientY + 12) + "px";
+      fftTooltipEl.classList.add("visible");
+    });
+    canvas.addEventListener("mouseleave", () => {
+      fftTooltipEl.classList.remove("visible");
+    });
+  }
 
   // -------------------------------------------------
   // UI wiring
