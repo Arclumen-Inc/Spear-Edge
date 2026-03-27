@@ -47,6 +47,11 @@ class SdrConfigRequest(BaseModel):
     dual_channel: bool = False  # Dual RX mode
 
 
+class SdrGainRequest(BaseModel):
+    gain_mode: GainMode = GainMode.MANUAL
+    gain_db: float = 0.0
+
+
 # -------------------------------------------------
 # Router binding
 # -------------------------------------------------
@@ -243,10 +248,6 @@ def bind(orchestrator) -> APIRouter:
     # SDR gain-only (for real-time slider; no tune/rate change)
     # -------------------------------------------------
 
-    class SdrGainRequest(BaseModel):
-        gain_mode: GainMode = GainMode.MANUAL
-        gain_db: float = 0.0
-
     @router.post("/sdr/gain")
     async def set_sdr_gain(req: SdrGainRequest):
         """Apply only gain. Does not change frequency, sample rate, or bandwidth. Use for real-time gain slider."""
@@ -368,6 +369,14 @@ def bind(orchestrator) -> APIRouter:
                 "current_config": getattr(orchestrator, "sdr_config", None).__dict__
                 if getattr(orchestrator, "sdr_config", None)
                 else None,
+                "effective_state": {
+                    "center_freq_hz": getattr(sdr, "center_freq_hz", None),
+                    "sample_rate_sps": getattr(sdr, "sample_rate_sps", None),
+                    "bandwidth_hz": getattr(sdr, "bandwidth_hz", None),
+                    "gain_mode": getattr(getattr(sdr, "gain_mode", None), "value", getattr(sdr, "gain_mode", None)),
+                    "gain_db": getattr(sdr, "gain_db", None),
+                    "rx_channel": getattr(sdr, "rx_channel", None),
+                },
             }
 
             if hasattr(sdr, "get_info"):

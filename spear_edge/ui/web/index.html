@@ -128,12 +128,6 @@
         </div>
       </div>
 
-      <!-- START / STOP CONTROLS -->
-      <div class="controls">
-        <button id="start">Start Live</button>
-        <button id="stop">Stop</button>
-      </div>
-
     </div>
   </header>
 
@@ -185,6 +179,7 @@
             <span class="health-value" id="healthUsbSpeed">—</span>
           </div>
         </div>
+        <div id="sdrHealthAlert" class="health-alert">No active health alerts.</div>
       </div>
 
       <div class="panel">
@@ -198,6 +193,9 @@
           <div><strong>Rate:</strong> <span id="sdr-rate">—</span></div>
           <div><strong>Gain:</strong> <span id="sdr-gain">—</span></div>
           <div><strong>Mode:</strong> <span id="sdr-gain-mode">—</span></div>
+          <div class="sdr-wide-row"><strong>Requested:</strong> <span id="sdr-requested">—</span></div>
+          <div class="sdr-wide-row"><strong>Effective:</strong> <span id="sdr-effective">—</span></div>
+          <div class="sdr-wide-row"><strong>State:</strong> <span id="sdr-delta">IN SYNC</span></div>
         </div>
 
         <div class="form-grid">
@@ -297,7 +295,10 @@
       <!-- RF SPECTRUM -->
       <div class="panel">
         <div class="panel-header">
-          <span>RF Spectrum</span>
+          <div class="spectrum-title-row">
+            <span>RF Spectrum</span>
+            <button id="start" class="btn-live-toggle" title="Start or stop live scan">Start</button>
+          </div>
           <div class="spectrum-controls">
             <!-- FFT Controls -->
             <div class="control-group">

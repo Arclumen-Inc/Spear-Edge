@@ -16,7 +16,6 @@ const statusEl          = document.getElementById("status");
 const canvas            = document.getElementById("spec");
 const ctx               = canvas ? canvas.getContext("2d") : null;
 const startBtn          = document.getElementById("start");
-const stopBtn           = document.getElementById("stop");
 const tripwireNodesEl   = document.getElementById("tripwireNodesTop");
 const tripwireHeader    = document.getElementById("tripwireHeaderTop");
 const tripwireBody      = document.getElementById("tripwireBodyTop");
@@ -75,6 +74,9 @@ const sdrCenterEl       = document.getElementById("sdr-center");
 const sdrRateEl         = document.getElementById("sdr-rate");
 const sdrGainEl         = document.getElementById("sdr-gain");
 const sdrGainModeEl     = document.getElementById("sdr-gain-mode");
+const sdrRequestedEl    = document.getElementById("sdr-requested");
+const sdrEffectiveEl    = document.getElementById("sdr-effective");
+const sdrDeltaEl        = document.getElementById("sdr-delta");
 
 // edgeModeLabel removed - mode shown in modePill instead
 const btnManual         = document.getElementById("btnManual");
@@ -1631,16 +1633,23 @@ function stopNotifyWs() {
 
 async function startLive() {
   console.log("[Live] startLive() called");
+  // Optimistic UI: show Stop immediately so the button reflects "live" state
+  if (startBtn) {
+    startBtn.textContent = "Stop";
+    startBtn.title = "Stop live scan";
+  }
+  liveRunning = true;
+
   resizeCanvas(true);
   const cfg = readSdrForm();
   console.log("[Live] SDR config:", cfg);
-  
+
   try {
     // CRITICAL: Apply SDR config FIRST (including gain, LNA, BT200)
     // This ensures gain settings are applied before starting the scan
     console.log("[Live] Applying SDR config (gain, LNA, BT200)...");
     await applySdrConfig();
-    
+
     // Then start the live scan with FFT parameters
     console.log("[Live] Calling API.liveStart with payload:", {
       center_freq_hz: cfg.center_freq_hz,
@@ -1657,10 +1666,16 @@ async function startLive() {
     console.log("[Live] API.liveStart succeeded:", result);
   } catch (e) {
     console.error("[Live] backend start failed:", e);
+    // Revert button and state on failure
+    if (startBtn) {
+      startBtn.textContent = "Start";
+      startBtn.title = "Start live scan";
+    }
+    liveRunning = false;
     alert(`Failed to start live scan: ${e.message || e}`);
-    return; // Don't start WebSocket if backend failed
+    return;
   }
-  
+
   console.log("[Live] Starting WebSocket connections...");
   stopFftWs();
   startFftWs();
@@ -1671,8 +1686,14 @@ async function startLive() {
 
 async function stopLive() {
   console.log("[Live] stopLive() called");
-  
-  // Stop backend scan first
+  // Optimistic UI: show Start immediately
+  if (startBtn) {
+    startBtn.textContent = "Start";
+    startBtn.title = "Start live scan";
+  }
+  liveRunning = false;
+
+  // Stop backend scan
   try {
     const response = await fetch("/live/stop", {
       method: "POST",
@@ -1687,25 +1708,29 @@ async function stopLive() {
   } catch (e) {
     console.error("[Live] Error stopping backend scan:", e);
   }
-  
-  // Then stop frontend WebSocket connections
+
+  // Stop frontend WebSocket connections
   stopFftWs();
   stopNotifyWs();
   refreshStatus();
   console.log("[Live] stopLive() completed");
 }
 
-if (startBtn) {
-  console.log("[Init] Start button found, wiring up click handler");
-  startBtn.onclick = startLive;
-} else {
-  console.error("[Init] Start button NOT FOUND! ID='start'");
+let liveRunning = false;
+
+function toggleLive() {
+  if (liveRunning) {
+    stopLive();
+  } else {
+    startLive();
+  }
 }
-if (stopBtn) {
-  console.log("[Init] Stop button found, wiring up click handler");
-  stopBtn.onclick = stopLive;
+
+if (startBtn) {
+  console.log("[Init] Live toggle button found, wiring up click handler");
+  startBtn.onclick = toggleLive;
 } else {
-  console.error("[Init] Stop button NOT FOUND! ID='stop'");
+  console.error("[Init] Live toggle button NOT FOUND! ID='start'");
 }
 
 // ------------------------------
@@ -1715,6 +1740,7 @@ function updateSdrStatus(info) {
   if (!info) return;
   const device = info?.device || {};
   const cfg = info?.current_config || {};
+  const eff = info?.effective_state || {};
   if (sdrDriverEl) sdrDriverEl.textContent = device.driver || info.driver || "Unknown SDR";
   // RX port: prefer device.active_rx_channel (actual hardware state), fallback to cfg.rx_channel
   const rxChannel = device.active_rx_channel !== undefined ? device.active_rx_channel : (cfg.rx_channel !== undefined ? cfg.rx_channel : null);
@@ -1723,6 +1749,57 @@ function updateSdrStatus(info) {
   if (sdrRateEl) sdrRateEl.textContent = cfg.sample_rate_sps ? (cfg.sample_rate_sps / 1e6).toFixed(2) + " MS/s" : "—";
   if (sdrGainEl) sdrGainEl.textContent = (cfg.gain_db !== undefined) ? (cfg.gain_db + " dB") : "—";
   if (sdrGainModeEl) sdrGainModeEl.textContent = cfg.gain_mode || "manual";
+
+  if (sdrRequestedEl) {
+    const reqTxt = [
+      cfg.center_freq_hz ? `${(cfg.center_freq_hz / 1e6).toFixed(3)} MHz` : "—",
+      cfg.sample_rate_sps ? `${(cfg.sample_rate_sps / 1e6).toFixed(2)} MS/s` : "—",
+      (cfg.gain_db !== undefined) ? `${Number(cfg.gain_db).toFixed(1)} dB` : "—",
+      (cfg.gain_mode || "manual").toUpperCase(),
+    ].join(" | ");
+    sdrRequestedEl.textContent = reqTxt;
+  }
+
+  if (sdrEffectiveEl) {
+    const effTxt = [
+      eff.center_freq_hz ? `${(eff.center_freq_hz / 1e6).toFixed(3)} MHz` : "—",
+      eff.sample_rate_sps ? `${(eff.sample_rate_sps / 1e6).toFixed(2)} MS/s` : "—",
+      (eff.gain_db !== undefined && eff.gain_db !== null) ? `${Number(eff.gain_db).toFixed(1)} dB` : "—",
+      (eff.gain_mode || "unknown").toString().toUpperCase(),
+    ].join(" | ");
+    sdrEffectiveEl.textContent = effTxt;
+  }
+
+  if (sdrDeltaEl) {
+    const freqMismatch =
+      Number.isFinite(Number(cfg.center_freq_hz)) &&
+      Number.isFinite(Number(eff.center_freq_hz)) &&
+      Math.abs(Number(cfg.center_freq_hz) - Number(eff.center_freq_hz)) > 1000;
+    const rateMismatch =
+      Number.isFinite(Number(cfg.sample_rate_sps)) &&
+      Number.isFinite(Number(eff.sample_rate_sps)) &&
+      Math.abs(Number(cfg.sample_rate_sps) - Number(eff.sample_rate_sps)) > 1000;
+    const gainMismatch =
+      Number.isFinite(Number(cfg.gain_db)) &&
+      Number.isFinite(Number(eff.gain_db)) &&
+      Math.abs(Number(cfg.gain_db) - Number(eff.gain_db)) > 0.5;
+    const modeMismatch =
+      typeof cfg.gain_mode === "string" &&
+      typeof eff.gain_mode === "string" &&
+      cfg.gain_mode.toLowerCase() !== eff.gain_mode.toLowerCase();
+
+    const mismatchCount = [freqMismatch, rateMismatch, gainMismatch, modeMismatch].filter(Boolean).length;
+    sdrDeltaEl.classList.remove("warn", "bad");
+    if (mismatchCount === 0) {
+      sdrDeltaEl.textContent = "IN SYNC";
+    } else if (mismatchCount === 1) {
+      sdrDeltaEl.textContent = "MINOR DRIFT";
+      sdrDeltaEl.classList.add("warn");
+    } else {
+      sdrDeltaEl.textContent = "CONFIG MISMATCH";
+      sdrDeltaEl.classList.add("bad");
+    }
+  }
   
   // Update gain input from current_config, but not if user just moved the slider (avoids snap-back to stale value)
   if (cfg.gain_db !== undefined && gainSlider && (Date.now() - lastGainSliderInputAt) > GAIN_SLIDER_GRACE_MS) {
@@ -1823,6 +1900,7 @@ function updateSdrHealth(health) {
     const readsEl = document.getElementById("healthReads");
     const streamEl = document.getElementById("healthStream");
     const usbSpeedEl = document.getElementById("healthUsbSpeed");
+    const alertEl = document.getElementById("sdrHealthAlert");
 
     if (!statusBtn) return;
 
@@ -1867,6 +1945,25 @@ function updateSdrHealth(health) {
     }
     if (usbSpeedEl) {
       usbSpeedEl.textContent = health.usb_speed || "Unknown";
+    }
+
+    if (alertEl) {
+      const issues = [];
+      const statusVal = (health.status || "unknown").toLowerCase();
+      const success = Number(health.success_rate_pct);
+      const errors = Number(health.errors || 0);
+      const stream = String(health.stream || "").toLowerCase();
+
+      if (statusVal === "poor") issues.push("health is POOR");
+      if (stream && stream !== "active") issues.push(`stream is ${stream}`);
+      if (Number.isFinite(success) && success < 97) issues.push(`read success ${success.toFixed(1)}%`);
+      if (Number.isFinite(errors) && errors > 0) issues.push(`errors ${errors}`);
+
+      if (issues.length === 0) {
+        alertEl.textContent = "No active health alerts.";
+      } else {
+        alertEl.textContent = `Attention: ${issues.join(" | ")}`;
+      }
     }
   } catch (e) {
     console.warn("[SDR Health] Error updating health panel:", e);
@@ -3314,7 +3411,7 @@ function init() {
       clearTimeout(smoothingTimeout);
       smoothingTimeout = setTimeout(async () => {
         try {
-          const response = await fetch("/api/live/smoothing", {
+          const response = await fetch("/live/smoothing", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ alpha: alpha }),

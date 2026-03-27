@@ -860,6 +860,7 @@ async def activate_model(request: Request):
     """Activate a model by copying it to the primary model path."""
     body = await request.json()
     model_path = body.get("model_path")
+    allow_unvalidated = bool(body.get("allow_unvalidated", False))
     
     if not model_path:
         raise HTTPException(status_code=400, detail="model_path is required")
@@ -876,9 +877,55 @@ async def activate_model(request: Request):
     # Verify it's a .pth file
     if not model_file.suffix == ".pth":
         raise HTTPException(status_code=400, detail="Only .pth model files can be activated")
+
+    # Require a passing validation artifact by default.
+    # Operators may explicitly bypass with allow_unvalidated=true for emergency use.
+    validation_path = model_file.with_suffix(".validation.json")
+    validation_summary = {
+        "path": str(validation_path),
+        "exists": validation_path.exists(),
+        "validated": False,
+        "reason": "missing_validation_artifact",
+    }
+    if validation_path.exists():
+        try:
+            validation_data = json.loads(validation_path.read_text(encoding="utf-8"))
+            validation_summary["validated"] = bool(validation_data.get("validated", False))
+            validation_summary["reason"] = validation_data.get("reason", "unknown")
+            metrics = validation_data.get("metrics", {})
+            if isinstance(metrics, dict):
+                validation_summary["val_accuracy_pct"] = metrics.get("val_accuracy_pct")
+                validation_summary["macro_f1"] = metrics.get("macro_f1")
+        except Exception as e:
+            validation_summary["reason"] = f"invalid_validation_artifact: {e}"
+
+    if not allow_unvalidated:
+        if not validation_summary["exists"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Model activation blocked: missing .validation.json artifact. "
+                       "Run evaluation first or set allow_unvalidated=true to override.",
+            )
+        if not validation_summary["validated"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model activation blocked: validation did not pass ({validation_summary['reason']}). "
+                       "Set allow_unvalidated=true to override.",
+            )
     
     # Backup current model if it exists
     primary_model = MODELS_DIR / "rf_classifier.pth"
+    if model_file.resolve() == primary_model.resolve():
+        return {
+            "ok": True,
+            "message": "Model is already active.",
+            "model_path": str(primary_model),
+            "backup_path": None,
+            "validation": validation_summary,
+            "allow_unvalidated": allow_unvalidated,
+            "no_op": True,
+        }
+
     backup_path = None
     if primary_model.exists():
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
@@ -895,7 +942,9 @@ async def activate_model(request: Request):
             "ok": True,
             "message": "Model activated successfully. Restart application to use new model.",
             "model_path": str(primary_model),
-            "backup_path": str(backup_path) if backup_path else None
+            "backup_path": str(backup_path) if backup_path else None,
+            "validation": validation_summary,
+            "allow_unvalidated": allow_unvalidated,
         }
     except Exception as e:
         # Restore backup if copy failed

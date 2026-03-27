@@ -159,6 +159,29 @@ pre {
   flex-wrap: wrap;
 }
 
+.spectrum-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-live-toggle {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid var(--accent-green-dim);
+  color: var(--accent-green);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-live-toggle:hover {
+  background: var(--accent-green-dim);
+  border-color: var(--accent-green);
+}
+
 .spectrum-controls {
   display: flex;
   align-items: center;
@@ -1056,6 +1079,28 @@ input[type="range"]:focus::-moz-range-thumb {
   white-space: nowrap;
   flex-shrink: 0;
   text-align: right;
+}
+
+.sdr-status > div.sdr-wide-row {
+  grid-column: 1 / -1;
+}
+
+#sdr-delta.warn {
+  color: var(--armed-amber);
+}
+
+#sdr-delta.bad {
+  color: var(--danger-red);
+}
+
+.health-alert {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 179, 0, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 179, 0, 0.08);
+  color: var(--armed-amber);
+  font-size: 11px;
+  padding: 6px 8px;
 }
 
 /* Tripwire Nodes Panel - Compact Cards */

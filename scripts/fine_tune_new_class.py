@@ -22,8 +22,11 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
+import platform
 import sys
+import time
 from pathlib import Path
 import numpy as np
 import torch
@@ -274,6 +277,81 @@ def validate(model, dataloader, criterion, device):
     return avg_loss, accuracy
 
 
+def sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def dataset_fingerprint(dataset_dir: Path) -> dict:
+    npy_files = sorted(dataset_dir.rglob("*.npy"))
+    hasher = hashlib.sha256()
+    for p in npy_files:
+        rel = str(p.relative_to(dataset_dir))
+        st = p.stat()
+        hasher.update(f"{rel}:{st.st_size}:{int(st.st_mtime)}".encode("utf-8"))
+    return {
+        "root": str(dataset_dir),
+        "npy_count": len(npy_files),
+        "fingerprint_sha256": hasher.hexdigest(),
+    }
+
+
+def compute_per_class_metrics(confusion: np.ndarray) -> dict:
+    per_class = {}
+    n = confusion.shape[0]
+    for i in range(n):
+        tp = float(confusion[i, i])
+        fp = float(confusion[:, i].sum() - tp)
+        fn = float(confusion[i, :].sum() - tp)
+        support = int(confusion[i, :].sum())
+        precision = (tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+        recall = (tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        per_class[str(i)] = {
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": support,
+        }
+    macro_f1 = float(np.mean([v["f1"] for v in per_class.values()])) if per_class else 0.0
+    macro_precision = float(np.mean([v["precision"] for v in per_class.values()])) if per_class else 0.0
+    macro_recall = float(np.mean([v["recall"] for v in per_class.values()])) if per_class else 0.0
+    return {
+        "per_class": per_class,
+        "macro_f1": macro_f1,
+        "macro_precision": macro_precision,
+        "macro_recall": macro_recall,
+    }
+
+
+def evaluate_with_confusion(model, dataloader, criterion, device, num_classes: int):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
+    with torch.no_grad():
+        for data, target in dataloader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            loss = criterion(output, target)
+            total_loss += loss.item()
+            pred = output.argmax(dim=1)
+            correct += pred.eq(target).sum().item()
+            total += target.size(0)
+            t_np = target.cpu().numpy()
+            p_np = pred.cpu().numpy()
+            for t, p in zip(t_np, p_np):
+                if 0 <= int(t) < num_classes and 0 <= int(p) < num_classes:
+                    confusion[int(t), int(p)] += 1
+    avg_loss = (total_loss / len(dataloader)) if len(dataloader) > 0 else 0.0
+    accuracy = (100.0 * correct / total) if total > 0 else 0.0
+    return avg_loss, accuracy, confusion
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fine-tune RF classifier to add new class"
@@ -355,6 +433,12 @@ def main():
         default=42,
         help="Random seed (default: 42)"
     )
+    parser.add_argument(
+        "--min-val-accuracy",
+        type=float,
+        default=60.0,
+        help="Minimum validation accuracy required to mark model as validated"
+    )
     
     args = parser.parse_args()
     
@@ -364,6 +448,12 @@ def main():
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+    try:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
     
     # Load class labels
     if not args.class_labels.exists():
@@ -454,6 +544,7 @@ def main():
     print(f"\n[INFO] Starting fine-tuning for {args.epochs} epochs...")
     best_val_acc = 0.0
     train_history = []
+    saved_model = False
     
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -511,16 +602,116 @@ def main():
                 best_val_acc = val_acc
                 checkpoint['best_val_acc'] = best_val_acc
                 torch.save(checkpoint, args.output_path)
+                saved_model = True
                 print(f"  ✓ Saved best model (val_acc: {val_acc:.2f}%)")
         else:
             # Save model every epoch if no validation
             torch.save(checkpoint, args.output_path)
+            saved_model = True
             print(f"  ✓ Saved model checkpoint (epoch {epoch})")
+
+    if not saved_model:
+        # Fallback save to ensure output exists even if val accuracy never improved over baseline
+        final_checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'num_classes': old_num_classes if new_num_classes == old_num_classes else new_num_classes,
+            'epoch': args.epochs,
+            'train_history': train_history,
+            'fine_tuned_from': str(args.model_path),
+            'fine_tune_config': {
+                'epochs': args.epochs,
+                'batch_size': args.batch_size,
+                'learning_rate': args.learning_rate,
+                'include_old_data': args.include_old_data,
+                'old_data_ratio': args.old_data_ratio,
+            },
+        }
+        torch.save(final_checkpoint, args.output_path)
+        saved_model = True
+
+    # Build validation + reproducibility artifacts
+    class_to_index = class_labels.get("class_to_index", {})
+    index_to_class = {int(v): k for k, v in class_to_index.items()}
+    num_classes_eval = len(class_to_index)
+    validation_artifact_path = args.output_path.with_suffix(".validation.json")
+    modelcard_artifact_path = args.output_path.with_suffix(".modelcard.json")
+
+    validation = {
+        "model_path": str(args.output_path),
+        "created_at_unix": time.time(),
+        "validated": False,
+        "reason": "no_validation_loader",
+        "thresholds": {
+            "min_val_accuracy_pct": float(args.min_val_accuracy),
+        },
+        "metrics": {},
+    }
+    if val_loader:
+        val_loss, val_acc, confusion = evaluate_with_confusion(
+            model, val_loader, criterion, device, num_classes=num_classes_eval
+        )
+        per_class_metrics = compute_per_class_metrics(confusion)
+        passed = float(val_acc) >= float(args.min_val_accuracy)
+        validation = {
+            "model_path": str(args.output_path),
+            "created_at_unix": time.time(),
+            "validated": bool(passed),
+            "reason": "ok" if passed else "val_accuracy_below_threshold",
+            "thresholds": {
+                "min_val_accuracy_pct": float(args.min_val_accuracy),
+            },
+            "metrics": {
+                "val_accuracy_pct": float(val_acc),
+                "val_loss": float(val_loss),
+                "macro_f1": per_class_metrics["macro_f1"],
+                "macro_precision": per_class_metrics["macro_precision"],
+                "macro_recall": per_class_metrics["macro_recall"],
+                "confusion_matrix": confusion.tolist(),
+                "per_class": {
+                    index_to_class.get(int(k), f"class_{k}"): v
+                    for k, v in per_class_metrics["per_class"].items()
+                },
+                "num_val_batches": len(val_loader),
+            },
+        }
+
+    modelcard = {
+        "schema": "spear_edge.modelcard.v1",
+        "model_path": str(args.output_path),
+        "model_sha256": sha256_file(args.output_path),
+        "base_model_path": str(args.model_path),
+        "base_model_sha256": sha256_file(args.model_path),
+        "new_class_id": args.new_class_id,
+        "num_classes": int(new_num_classes if new_num_classes >= old_num_classes else old_num_classes),
+        "dataset": dataset_fingerprint(args.dataset_dir),
+        "training": {
+            "epochs": int(args.epochs),
+            "batch_size": int(args.batch_size),
+            "learning_rate": float(args.learning_rate),
+            "include_old_data": bool(args.include_old_data),
+            "old_data_ratio": float(args.old_data_ratio),
+            "seed": int(args.seed),
+            "device": str(device),
+        },
+        "runtime": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "torch_version": torch.__version__,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "cuda_version": str(torch.version.cuda),
+        },
+        "validation": validation,
+    }
+
+    validation_artifact_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+    modelcard_artifact_path.write_text(json.dumps(modelcard, indent=2), encoding="utf-8")
     
     print(f"\n[SUCCESS] Fine-tuning complete!")
     print(f"  Model saved to: {args.output_path}")
     if val_loader:
         print(f"  Best validation accuracy: {best_val_acc:.2f}%")
+    print(f"  Validation artifact: {validation_artifact_path}")
+    print(f"  Model card artifact: {modelcard_artifact_path}")
     
     return 0
 
