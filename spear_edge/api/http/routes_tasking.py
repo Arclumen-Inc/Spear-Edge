@@ -68,14 +68,17 @@ def bind(orchestrator) -> APIRouter:
         print(f"[LIVE] /start ENTERED with req: {req}")
     
         # Set SDR config first (so start_scan can use it)
-        # This avoids redundant configuration in start_scan
+        # Preserve RX path / gain / BT200 from last apply (e.g. UI) — only replace freq & rate from this request.
+        prev = getattr(orchestrator, "sdr_config", None)
         cfg = SdrConfig(
             center_freq_hz=req.center_freq_hz,
             sample_rate_sps=req.sample_rate_sps,
-            gain_mode=GainMode.MANUAL,
-                gain_db=0.0,  # Default 0 dB - user can adjust via UI slider
-            rx_channel=0,
-            bandwidth_hz=None,
+            gain_mode=prev.gain_mode if prev else GainMode.MANUAL,
+            gain_db=prev.gain_db if prev else 0.0,
+            rx_channel=prev.rx_channel if prev else 0,
+            bandwidth_hz=prev.bandwidth_hz if prev else None,
+            bt200_enabled=getattr(prev, "bt200_enabled", None) if prev else None,
+            dual_channel=getattr(prev, "dual_channel", False) if prev else False,
         )
         orchestrator.sdr_config = cfg
     

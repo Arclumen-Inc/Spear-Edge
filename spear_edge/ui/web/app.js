@@ -56,6 +56,7 @@ const freqInput         = document.getElementById("freqInput");       // MHz
 const rateInput         = document.getElementById("rateInput");       // MS/s
 const fftSizeSelect     = document.getElementById("fftSizeSelect");
 const gainModeSelect    = document.getElementById("gainModeSelect"); // manual|agc
+const rxPathSelect      = document.getElementById("rxPathSelect");   // bladeRF RX1/RX2 → ch 0/1
 const gainSlider        = document.getElementById("gainSlider");     // Main gain slider (0-60 dB)
 const gainValue         = document.getElementById("gainValue");      // Gain value display
 const bt200Select       = document.getElementById("bt200Select");     // BT200 external LNA enable
@@ -511,6 +512,8 @@ function readSdrForm() {
   const fps = Number(fpsSelect?.value ?? 30);
   const bt200Enabled = bt200Select?.value === "true";
   const gainDb = gainSlider?.value ? Number(gainSlider.value) : 0.0;  // Read from slider (default 0)
+  let rxCh = rxPathSelect ? parseInt(rxPathSelect.value, 10) : 0;
+  if (!Number.isFinite(rxCh) || rxCh < 0 || rxCh > 1) rxCh = 0;
   return {
     center_freq_hz: Math.round(mhz * 1e6),
     sample_rate_sps: Math.round(msps * 1e6),
@@ -518,7 +521,7 @@ function readSdrForm() {
     fps: Number.isFinite(fps) ? fps : 30.0,
     gain_mode: gainModeSelect?.value || "manual",
     gain_db: Number.isFinite(gainDb) ? gainDb : 0.0,  // Read from slider (default 0)
-    rx_channel: 0,
+    rx_channel: rxCh,
     bandwidth_hz: bandwidthMhz ? Math.round(bandwidthMhz * 1e6) : null,
     bt200_enabled: bt200Enabled,
   };
@@ -530,6 +533,8 @@ let sdrConfigDebounceTimer = null;
 // When user last moved the gain slider (ms). Polling must not overwrite slider for a short period.
 let lastGainSliderInputAt = 0;
 const GAIN_SLIDER_GRACE_MS = 1500;
+let lastRxPathSelectAt = 0;
+const RX_PATH_GRACE_MS = 1500;
 
 async function applySdrConfig() {
   if (edgeMode === "tasked") return;
@@ -1741,10 +1746,39 @@ function updateSdrStatus(info) {
   const device = info?.device || {};
   const cfg = info?.current_config || {};
   const eff = info?.effective_state || {};
+  const maxRx = Number(info?.rx_channels);
+  const rxCount = Number.isFinite(maxRx) && maxRx > 0 ? maxRx : 2;
+  if (rxPathSelect) {
+    const opt1 = rxPathSelect.querySelector('option[value="1"]');
+    if (opt1) {
+      opt1.disabled = rxCount < 2;
+    }
+    if (rxCount < 2 && rxPathSelect.value === "1") {
+      rxPathSelect.value = "0";
+    }
+  }
   if (sdrDriverEl) sdrDriverEl.textContent = device.driver || info.driver || "Unknown SDR";
-  // RX port: prefer device.active_rx_channel (actual hardware state), fallback to cfg.rx_channel
-  const rxChannel = device.active_rx_channel !== undefined ? device.active_rx_channel : (cfg.rx_channel !== undefined ? cfg.rx_channel : null);
-  if (sdrRxPortEl) sdrRxPortEl.textContent = rxChannel !== null ? `RX${rxChannel}` : "—";
+  // RX port: prefer effective hardware rx_channel, then device hint, then requested config
+  const rxChannel =
+    eff.rx_channel !== undefined && eff.rx_channel !== null
+      ? Number(eff.rx_channel)
+      : device.active_rx_channel !== undefined
+        ? Number(device.active_rx_channel)
+        : cfg.rx_channel !== undefined
+          ? Number(cfg.rx_channel)
+          : null;
+  if (sdrRxPortEl) {
+    sdrRxPortEl.textContent =
+      rxChannel === 1 ? "RX2 (ch 1)" : rxChannel === 0 ? "RX1 (ch 0)" : "—";
+  }
+  if (
+    cfg.rx_channel !== undefined &&
+    rxPathSelect &&
+    Date.now() - lastRxPathSelectAt > RX_PATH_GRACE_MS
+  ) {
+    const ch = Number(cfg.rx_channel) === 1 ? 1 : 0;
+    rxPathSelect.value = String(ch);
+  }
   if (sdrCenterEl) sdrCenterEl.textContent = cfg.center_freq_hz ? (cfg.center_freq_hz / 1e6).toFixed(3) + " MHz" : "—";
   if (sdrRateEl) sdrRateEl.textContent = cfg.sample_rate_sps ? (cfg.sample_rate_sps / 1e6).toFixed(2) + " MS/s" : "—";
   if (sdrGainEl) sdrGainEl.textContent = (cfg.gain_db !== undefined) ? (cfg.gain_db + " dB") : "—";
@@ -3297,6 +3331,11 @@ function init() {
   if (btnApplySdr) btnApplySdr.addEventListener("click", applySdrConfig);
   if (btnManualCapture) btnManualCapture.addEventListener("click", startManualCapture);
   if (gainModeSelect) gainModeSelect.addEventListener("change", updateGainUiLock);
+  if (rxPathSelect) {
+    rxPathSelect.addEventListener("change", () => {
+      lastRxPathSelectAt = Date.now();
+    });
+  }
   
   // Frequency, sample rate, and bandwidth apply ONLY when "Apply SDR Settings" is clicked.
   // (Gain slider still applies in real time via its own debounced handler below.)

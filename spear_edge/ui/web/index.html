@@ -205,6 +205,15 @@
           </label>
 
           <label>
+            RX input
+            <select id="rxPathSelect">
+              <option value="0" selected>RX1 SMA (ch 0)</option>
+              <option value="1">RX2 SMA (ch 1)</option>
+            </select>
+            <small style="font-size: 9px; color: var(--text-muted); word-wrap: break-word;">Which receive port is active (dual-antenna setups).</small>
+          </label>
+
+          <label>
             Sample Rate (MS/s)
             <input type="number" id="rateInput" value="2.0" step="0.01" min="0.1" max="61.44">
           </label>
