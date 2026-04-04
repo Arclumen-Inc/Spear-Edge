@@ -4,19 +4,18 @@ PyTorch-based RF signal classifier with GPU support.
 Uses CUDA when available for accelerated inference.
 """
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
-try:
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None
-    nn = None
+from spear_edge.ml.calibration import distribution_entropy_natural, load_temperature_from_json
+from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA, spec_ml_to_single_bchw
+
+TORCH_AVAILABLE = True
 
 
 class RFClassifier(nn.Module):
@@ -130,6 +129,7 @@ class PyTorchRfClassifier:
         
         # Store model path for API access
         self.model_path = str(model_path) if model_path else None
+        self.calibration_temperature = 1.0
         
         # Load or create model
         # Create model on CPU first (more reliable for loading)
@@ -144,12 +144,33 @@ class PyTorchRfClassifier:
                     self.model = RFClassifier(num_classes=self.num_classes)
                     self.model.load_state_dict(checkpoint['model_state_dict'])
                     print(f"[PyTorch] Loaded checkpoint with {self.num_classes} classes")
+                    ck_schema = checkpoint.get("preprocess_schema")
+                    if ck_schema and ck_schema != CURRENT_PREPROCESS_SCHEMA:
+                        print(
+                            f"[PyTorch] WARNING: checkpoint preprocess_schema={ck_schema!r} "
+                            f"!= runtime {CURRENT_PREPROCESS_SCHEMA!r}; retrain recommended"
+                        )
+                    elif not ck_schema:
+                        print(
+                            f"[PyTorch] WARNING: checkpoint missing preprocess_schema "
+                            f"(legacy); runtime expects {CURRENT_PREPROCESS_SCHEMA!r}"
+                        )
+                    cal_p = Path(model_path).with_suffix(".calibration.json")
+                    t_cal = load_temperature_from_json(cal_p)
+                    if t_cal is not None:
+                        self.calibration_temperature = t_cal
+                        print(f"[PyTorch] Loaded calibration temperature {t_cal:.4f} from {cal_p.name}")
                 elif isinstance(checkpoint, dict) and any(k.startswith('conv') or k.startswith('fc') for k in checkpoint.keys()):
                     # State dict only
                     self.num_classes = num_classes
                     self.model = RFClassifier(num_classes=self.num_classes)
                     self.model.load_state_dict(checkpoint)
                     print(f"[PyTorch] Loaded state dict")
+                    cal_p = Path(model_path).with_suffix(".calibration.json")
+                    t_cal = load_temperature_from_json(cal_p)
+                    if t_cal is not None:
+                        self.calibration_temperature = t_cal
+                        print(f"[PyTorch] Loaded calibration temperature {t_cal:.4f} from {cal_p.name}")
                 else:
                     # Assume it's a full model
                     self.model = checkpoint
@@ -227,30 +248,7 @@ class PyTorchRfClassifier:
             - model: "pytorch"
             - device: "cuda" or "cpu"
         """
-        # Ensure correct dtype
-        x = spec_ml.astype(np.float32)
-        
-        # Handle different input shapes
-        if x.ndim == 2:
-            # (512, 512) -> (1, 1, 512, 512) for CNN
-            x = x[None, None, :, :]
-        elif x.ndim == 3:
-            # (1, 512, 512) -> (1, 1, 512, 512)
-            if x.shape[0] == 1:
-                x = x[None, :, :, :]
-            else:
-                x = x[:, None, :, :]
-        elif x.ndim == 4:
-            # Already (batch, channels, H, W) - verify channels
-            if x.shape[1] != 1:
-                # Assume (batch, H, W, channels) -> transpose
-                x = x.transpose(0, 3, 1, 2)
-        
-        # Validate shape
-        if x.shape[1] != 1 or x.shape[2] != 512 or x.shape[3] != 512:
-            raise ValueError(
-                f"Expected input shape (batch, 1, 512, 512), got {x.shape}"
-            )
+        x = spec_ml_to_single_bchw(spec_ml)
         
         # Convert to tensor and move to device
         x_tensor = torch.from_numpy(x).to(self.device)
@@ -270,8 +268,11 @@ class PyTorchRfClassifier:
         if logits.ndim > 1:
             logits = logits[0]  # Take first batch item
         
-        # Apply softmax to get probabilities
-        exp_logits = np.exp(logits - np.max(logits))  # Numerical stability
+        t_cal = max(float(self.calibration_temperature), 1e-6)
+        scaled = logits / t_cal
+        # Softmax (1D stable)
+        m = float(np.max(scaled))
+        exp_logits = np.exp(scaled - m)
         probs = exp_logits / np.sum(exp_logits)
         
         # Get top prediction
@@ -324,13 +325,36 @@ class PyTorchRfClassifier:
                     "p": float(probs[i])
                 })
         
+        uncertain = False
+        uncertain_reasons: List[str] = []
+        min_c = os.environ.get("SPEAR_ML_UNCERTAIN_MIN_CONFIDENCE")
+        if min_c is not None:
+            try:
+                if confidence < float(min_c):
+                    uncertain = True
+                    uncertain_reasons.append("below_min_confidence")
+            except ValueError:
+                pass
+        min_ent = os.environ.get("SPEAR_ML_UNCERTAIN_MIN_ENTROPY_NATS")
+        if min_ent is not None:
+            try:
+                if distribution_entropy_natural(probs) > float(min_ent):
+                    uncertain = True
+                    uncertain_reasons.append("above_entropy_threshold")
+            except ValueError:
+                pass
+
         result = {
             "label": label,
             "confidence": confidence,
             "topk": topk,
             "model": "pytorch",
-            "device": self.device.type
+            "device": self.device.type,
+            "uncertain": uncertain,
+            "calibration_temperature": float(self.calibration_temperature),
         }
+        if uncertain_reasons:
+            result["uncertain_reasons"] = uncertain_reasons
         
         # Add hierarchical information if available
         if device_name:

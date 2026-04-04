@@ -1,0 +1,5 @@
+{
+  "version": "1.0",
+  "description": "Optional overrides: RFUAV dataset folder name (string) -> SPEAR class_id. Numeric folder names still use class_labels.json index_to_class in prepare_training_dataset.py when not listed here.",
+  "rfuav_dir_to_class": {}
+}

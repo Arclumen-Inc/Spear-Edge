@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pathlib import Path
 import json
+import os
 import zipfile
 import shutil
 import time
@@ -567,7 +568,7 @@ _training_jobs: Dict[str, Dict[str, Any]] = {}
 
 @router.post("/train/quick")
 async def quick_train(request: Request):
-    """Quick fine-tune on 1-2 captures."""
+    """Quick fine-tune on a small set of labeled captures (Phase D: val holdout when N>=2)."""
     body = await request.json()
     captures = body.get("captures", [])
     label = body.get("label")
@@ -575,8 +576,13 @@ async def quick_train(request: Request):
     batch_size = body.get("batch_size", 2)
     learning_rate = body.get("learning_rate", 1e-4)
     
-    if len(captures) < 1 or len(captures) > 2:
-        raise HTTPException(status_code=400, detail="Must select 1-2 captures")
+    if len(captures) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Select at least 2 captures (one is held out for validation when possible).",
+        )
+    if len(captures) > 12:
+        raise HTTPException(status_code=400, detail="Quick train allows at most 12 captures; use full training for larger sets.")
     
     if not label:
         raise HTTPException(status_code=400, detail="Label is required")
@@ -612,32 +618,45 @@ async def quick_train(request: Request):
     temp_dataset_dir.mkdir(parents=True, exist_ok=True)
     train_dir = temp_dataset_dir / "train" / label
     train_dir.mkdir(parents=True, exist_ok=True)
+    val_dir = temp_dataset_dir / "val" / label
+    val_dir.mkdir(parents=True, exist_ok=True)
     
-    # Extract spectrograms from captures
-    copied = 0
-    for capture_dir in captures:
+    # Hold out last capture for validation when we have >=2 usable spectrograms
+    def _copy_spec(capture_dir: str, dest_dir: Path) -> bool:
         cap_dir = CAPTURES_DIR / capture_dir
         spec_path = cap_dir / "features" / "spectrogram.npy"
-        
         if not spec_path.exists():
             print(f"[QUICK TRAIN] Warning: Spectrogram not found for {capture_dir}")
-            continue
-        
-        # Copy spectrogram to temp dataset
-        dest_path = train_dir / f"{capture_dir}.npy"
-        shutil.copy2(spec_path, dest_path)
-        copied += 1
+            return False
+        shutil.copy2(spec_path, dest_dir / f"{capture_dir}.npy")
+        return True
+    
+    usable = [c for c in captures if (CAPTURES_DIR / c / "features" / "spectrogram.npy").exists()]
+    if len(usable) < 2:
+        for c in captures:
+            _copy_spec(c, train_dir)
+        copied = sum(1 for c in captures if (train_dir / f"{c}.npy").exists())
+    else:
+        val_cap = usable[-1]
+        train_caps = [c for c in usable if c != val_cap]
+        copied = 0
+        for c in train_caps:
+            if _copy_spec(c, train_dir):
+                copied += 1
+        _copy_spec(val_cap, val_dir)
     
     if copied == 0:
         shutil.rmtree(temp_dataset_dir)
         raise HTTPException(status_code=400, detail="No valid spectrograms found in selected captures")
+
+    total_specs = len(list(train_dir.glob("*.npy"))) + len(list(val_dir.glob("*.npy")))
     
     # Create output model path
     timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
     output_model_path = MODELS_DIR / f"rf_classifier_quicktrain_{timestamp}.pth"
     
     # Initialize job status
-    _training_jobs[job_id] = {
+    job_record = {
         "status": "starting",
         "progress": 0.0,
         "epoch": 0,
@@ -646,8 +665,16 @@ async def quick_train(request: Request):
         "accuracy": None,
         "error": None,
         "output_path": str(output_model_path),
-        "started_at": time.time()
+        "started_at": time.time(),
+        "dataset_dir": str(temp_dataset_dir),
+        "label": label,
+        "captures": list(captures),
+        "activation_eligible": None,
+        "experimental": len(usable) < 2,
     }
+    _training_jobs[job_id] = job_record
+    job_json_path = temp_dataset_dir / "job.json"
+    job_json_path.write_text(json.dumps(job_record, indent=2), encoding="utf-8")
     
     # Start training in background
     asyncio.create_task(run_quick_train(
@@ -665,9 +692,12 @@ async def quick_train(request: Request):
     return {
         "ok": True,
         "job_id": job_id,
-        "captures_processed": copied,
+        "captures_processed": total_specs,
         "label": label,
-        "epochs": epochs
+        "epochs": epochs,
+        "experimental": job_record["experimental"],
+        "val_holdout": len(usable) >= 2,
+        "note": "Poll GET /api/ml/train/status/{job_id} for activation_eligible after completion.",
     }
 
 
@@ -791,6 +821,19 @@ async def run_quick_train(
         if return_code == 0:
             _training_jobs[job_id]["status"] = "completed"
             _training_jobs[job_id]["progress"] = 1.0
+            val_art = output_path.with_suffix(".validation.json")
+            activation_eligible = False
+            if val_art.exists():
+                try:
+                    vd = json.loads(val_art.read_text(encoding="utf-8"))
+                    activation_eligible = bool(vd.get("validated"))
+                    _training_jobs[job_id]["validation_summary"] = {
+                        "validated": activation_eligible,
+                        "reason": vd.get("reason"),
+                    }
+                except Exception as ex:
+                    _training_jobs[job_id]["validation_summary"] = {"error": str(ex)}
+            _training_jobs[job_id]["activation_eligible"] = activation_eligible
         else:
             # Collect all error information
             error_parts = []
@@ -825,9 +868,13 @@ async def run_quick_train(
         _training_jobs[job_id]["status"] = "failed"
         _training_jobs[job_id]["error"] = str(e)
     finally:
-        # Cleanup temp dataset (keep for a bit in case user wants to inspect)
-        # Could add cleanup task here if needed
-        pass
+        rec = _training_jobs.get(job_id)
+        if rec and rec.get("dataset_dir"):
+            try:
+                jp = Path(rec["dataset_dir"]) / "job.json"
+                jp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+            except Exception as ex:
+                print(f"[QUICK TRAIN] Failed to persist job.json: {ex}")
 
 
 @router.get("/train/status/{job_id}")
@@ -835,8 +882,20 @@ async def get_training_status(job_id: str):
     """Get training job status."""
     if job_id not in _training_jobs:
         raise HTTPException(status_code=404, detail="Training job not found")
-    
-    return _training_jobs[job_id]
+    rec = _training_jobs[job_id]
+    if (
+        rec.get("status") == "completed"
+        and rec.get("activation_eligible") is None
+        and rec.get("output_path")
+    ):
+        val_art = Path(rec["output_path"]).with_suffix(".validation.json")
+        if val_art.exists():
+            try:
+                vd = json.loads(val_art.read_text(encoding="utf-8"))
+                rec["activation_eligible"] = bool(vd.get("validated"))
+            except Exception:
+                rec["activation_eligible"] = False
+    return rec
 
 
 @router.post("/train/cancel/{job_id}")
@@ -951,3 +1010,48 @@ async def activate_model(request: Request):
         if backup_path and backup_path.exists():
             shutil.copy2(backup_path, primary_model)
         raise HTTPException(status_code=500, detail=f"Failed to activate model: {str(e)}")
+
+
+@router.post("/models/reload")
+async def reload_active_model(request: Request):
+    """
+    Reload capture manager classifier from spear_edge/ml/models/rf_classifier.pth in-process.
+    Set SPEAR_ML_ALLOW_HOT_RELOAD=0 to disable.
+    """
+    flag = os.environ.get("SPEAR_ML_ALLOW_HOT_RELOAD", "1").lower()
+    if flag in ("0", "false", "no", "off"):
+        raise HTTPException(
+            status_code=403,
+            detail="Hot reload disabled (SPEAR_ML_ALLOW_HOT_RELOAD=0).",
+        )
+    primary_model = MODELS_DIR / "rf_classifier.pth"
+    if not primary_model.exists():
+        raise HTTPException(status_code=404, detail="rf_classifier.pth not found in models directory")
+
+    orch = request.app.state.orchestrator
+    capture_mgr = orch.capture_mgr
+
+    try:
+        from spear_edge.ml.infer_pytorch import PyTorchRfClassifier
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"PyTorch classifier not available: {e}")
+
+    try:
+        clf = PyTorchRfClassifier(str(primary_model))
+        clf.model_path = str(primary_model)
+        capture_mgr.classifier = clf
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
+
+    out = {
+        "ok": True,
+        "message": "Classifier reloaded from rf_classifier.pth",
+        "model_path": str(primary_model),
+        "preprocess_schema": None,
+    }
+    try:
+        from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA
+        out["preprocess_schema"] = CURRENT_PREPROCESS_SCHEMA
+    except ImportError:
+        pass
+    return out

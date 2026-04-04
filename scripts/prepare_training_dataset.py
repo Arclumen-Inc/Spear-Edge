@@ -12,9 +12,11 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 import numpy as np
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import random
@@ -85,7 +87,16 @@ def process_rfuav_dataset(rfuav_dir: Path, class_labels: Dict, output_base: Path
     
     Returns: Dict mapping class_id to list of spectrogram paths
     """
-    rfuav_mapping = class_labels.get("rfuav_mapping", {})
+    project_root = Path(__file__).resolve().parent.parent
+    rfuav_cfg = project_root / "spear_edge" / "ml" / "config" / "rfuav_class_map.json"
+    extra_dir_map: Dict = {}
+    if rfuav_cfg.exists():
+        try:
+            with open(rfuav_cfg, "r", encoding="utf-8") as f:
+                extra_dir_map = json.load(f).get("rfuav_dir_to_class") or {}
+        except Exception as e:
+            print(f"[RFUAV] Could not load {rfuav_cfg}: {e}")
+    rfuav_mapping = {**class_labels.get("rfuav_mapping", {}), **extra_dir_map}
     class_to_index = class_labels.get("class_to_index", {})
     index_to_class = class_labels.get("index_to_class", {})
     
@@ -290,13 +301,86 @@ def validate_spectrogram(spec_path: Path) -> bool:
         return False
 
 
+def _capture_group_key(path: Path) -> str:
+    """Group SPEAR samples by capture directory when capture.json sits next to spectrogram."""
+    par = path.parent
+    if (par / "capture.json").is_file():
+        return f"capture:{par.name}"
+    return f"file:{path.resolve()}"
+
+
+def _split_paths_random(
+    valid_samples: List[Path],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+) -> Dict[str, List[Path]]:
+    vs = list(valid_samples)
+    random.shuffle(vs)
+    n_total = len(vs)
+    n_train = int(n_total * train_ratio)
+    n_val = int(n_total * val_ratio)
+    n_test = n_total - n_train - n_val
+    return {
+        "train": vs[:n_train],
+        "val": vs[n_train : n_train + n_val],
+        "test": vs[n_train + n_val :],
+    }
+
+
+def _split_paths_grouped(
+    valid_samples: List[Path],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    group_by: str,
+) -> Dict[str, List[Path]]:
+    if group_by != "capture":
+        return _split_paths_random(valid_samples, train_ratio, val_ratio, test_ratio)
+
+    groups: Dict[str, List[Path]] = defaultdict(list)
+    for p in valid_samples:
+        groups[_capture_group_key(p)].append(p)
+    keys = list(groups.keys())
+    random.shuffle(keys)
+    n_g = len(keys)
+    if n_g <= 1:
+        return _split_paths_random(valid_samples, train_ratio, val_ratio, test_ratio)
+
+    n_train_g = max(1, int(round(n_g * train_ratio)))
+    n_val_g = max(1, int(round(n_g * val_ratio))) if n_g > 2 else 0
+    n_test_g = max(1, n_g - n_train_g - n_val_g)
+    while n_train_g + n_val_g + n_test_g > n_g:
+        if n_val_g > 1:
+            n_val_g -= 1
+        elif n_test_g > 1:
+            n_test_g -= 1
+        else:
+            n_train_g = n_g - n_val_g - n_test_g
+            break
+    train_keys = keys[:n_train_g]
+    val_keys = keys[n_train_g : n_train_g + n_val_g]
+    test_keys = keys[n_train_g + n_val_g : n_train_g + n_val_g + n_test_g]
+
+    out = {"train": [], "val": [], "test": []}
+    for k in train_keys:
+        out["train"].extend(groups[k])
+    for k in val_keys:
+        out["val"].extend(groups[k])
+    for k in test_keys:
+        out["test"].extend(groups[k])
+    return out
+
+
 def organize_dataset(
     all_samples: Dict[str, List[Path]],
     output_dir: Path,
     class_labels: Dict,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
-    test_ratio: float = 0.1
+    test_ratio: float = 0.1,
+    group_by: str = "none",
+    class_labels_path: Optional[Path] = None,
 ) -> None:
     """
     Organize samples into train/val/test splits.
@@ -325,10 +409,24 @@ def organize_dataset(
     }
     
     class_to_index = class_labels.get("class_to_index", {})
+    try:
+        from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA
+    except ImportError:
+        CURRENT_PREPROCESS_SCHEMA = "spear_ml_spec_v1"
+
+    labels_fingerprint = ""
+    if class_labels_path and class_labels_path.exists():
+        h = hashlib.sha256()
+        h.update(class_labels_path.read_bytes())
+        labels_fingerprint = h.hexdigest()[:16]
+
     manifest = {
-        "version": "1.0",
+        "version": "2.0",
+        "preprocess_schema": CURRENT_PREPROCESS_SCHEMA,
+        "group_by": group_by,
+        "class_labels_sha256_16": labels_fingerprint,
         "num_classes": len(class_to_index),
-        "splits": {}
+        "splits": {},
     }
     
     print(f"[ORGANIZE] Organizing dataset into {output_dir}")
@@ -344,22 +442,13 @@ def organize_dataset(
             print(f"[ORGANIZE] No valid samples for {class_id}, skipping")
             continue
         
-        # Shuffle for random split
-        random.shuffle(valid_samples)
-        
-        # Calculate split sizes
-        n_total = len(valid_samples)
-        n_train = int(n_total * train_ratio)
-        n_val = int(n_total * val_ratio)
-        n_test = n_total - n_train - n_val
-        
-        split_samples = {
-            "train": valid_samples[:n_train],
-            "val": valid_samples[n_train:n_train + n_val],
-            "test": valid_samples[n_train + n_val:]
-        }
-        
-        print(f"[ORGANIZE] {class_id}: {n_train} train, {n_val} val, {n_test} test")
+        split_samples = _split_paths_grouped(
+            valid_samples, train_ratio, val_ratio, test_ratio, group_by
+        )
+        n_train = len(split_samples["train"])
+        n_val = len(split_samples["val"])
+        n_test = len(split_samples["test"])
+        print(f"[ORGANIZE] {class_id}: {n_train} train, {n_val} val, {n_test} test (group_by={group_by})")
         
         # Copy samples to organized structure
         for split_name, samples in split_samples.items():
@@ -457,6 +546,13 @@ def main():
         default=42,
         help="Random seed for shuffling (default: 42)"
     )
+    parser.add_argument(
+        "--group-by",
+        type=str,
+        choices=["none", "capture"],
+        default="none",
+        help="Split mode: 'capture' keeps all files from one SPEAR capture in one split (when capture.json is present).",
+    )
     
     args = parser.parse_args()
     
@@ -501,7 +597,9 @@ def main():
         class_labels,
         args.train_ratio,
         args.val_ratio,
-        args.test_ratio
+        args.test_ratio,
+        group_by=args.group_by,
+        class_labels_path=args.class_labels,
     )
     
     # Cleanup temporary RFUAV directory

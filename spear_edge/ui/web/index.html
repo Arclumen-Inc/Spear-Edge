@@ -285,11 +285,6 @@
             <span id="wfContrastValue" style="font-size: 11px; color: var(--text-muted);">1.0</span>
           </label>
 
-          <div class="btn-row">
-            <button id="btnApplySdr">Apply SDR</button>
-            <button id="btnManualCapture">Capture</button>
-          </div>
-
           <div class="small-note">
             In <b>TASKED</b> mode, these controls are read-only.
           </div>
@@ -306,7 +301,11 @@
         <div class="panel-header">
           <div class="spectrum-title-row">
             <span>RF Spectrum</span>
-            <button id="start" class="btn-live-toggle" title="Start or stop live scan">Start</button>
+            <div class="spectrum-action-buttons">
+              <button type="button" id="btnApplySdr" class="btn-toolbar-primary">Apply SDR</button>
+              <button type="button" id="start" class="btn-toolbar-primary" title="Start or stop live scan">Start</button>
+              <button type="button" id="btnManualCapture" class="btn-toolbar-primary">Capture</button>
+            </div>
           </div>
           <div class="spectrum-controls">
             <!-- FFT Controls -->

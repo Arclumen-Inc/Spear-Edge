@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import platform
 import sys
 import os
 from pathlib import Path
@@ -34,7 +35,19 @@ if torch.cuda.is_available():
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from spear_edge.ml.eval import (
+    compute_per_class_metrics,
+    dataset_fingerprint,
+    evaluate_with_confusion,
+    sha256_file,
+)
 from spear_edge.ml.infer_pytorch import RFClassifier
+from spear_edge.ml.calibration import (
+    collect_val_logits,
+    fit_temperature,
+    save_calibration_json,
+)
+from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA, apply_model_preprocess_v1
 
 
 class SpectrogramDataset(Dataset):
@@ -91,22 +104,15 @@ class SpectrogramDataset(Dataset):
         sample = self.samples[idx]
         spec_path = self.dataset_dir / sample["path"]
         
-        # Load spectrogram
-        spec = np.load(spec_path).astype(np.float32)
-        
-        # Ensure correct shape: (512, 512) -> (1, 512, 512)
-        if spec.ndim == 2:
-            spec = spec[np.newaxis, :, :]
-        elif spec.ndim == 3 and spec.shape[0] == 1:
-            pass  # Already correct
+        # Load spectrogram (spear_ml_spec_v1: same normalization as live capture — no per-sample min-max)
+        raw = np.load(spec_path)
+        if raw.ndim == 2:
+            spec2 = apply_model_preprocess_v1(raw)
+        elif raw.ndim == 3 and raw.shape[0] == 1:
+            spec2 = apply_model_preprocess_v1(raw[0])
         else:
-            raise ValueError(f"Unexpected spectrogram shape: {spec.shape}")
-        
-        # Normalize to [0, 1] range (assuming dB scale)
-        spec_min = spec.min()
-        spec_max = spec.max()
-        if spec_max > spec_min:
-            spec = (spec - spec_min) / (spec_max - spec_min)
+            raise ValueError(f"Unexpected spectrogram shape: {raw.shape}")
+        spec = spec2[np.newaxis, :, :]
         
         # Apply transform (augmentation)
         if self.transform:
@@ -127,24 +133,15 @@ class RandomFlip:
         return x
 
 
-class RandomRotation:
-    """Small random rotation augmentation."""
-    def __init__(self, max_angle=5):
-        self.max_angle = max_angle
-    
-    def __call__(self, x):
-        angle = np.random.uniform(-self.max_angle, self.max_angle)
-        # Simple rotation using scipy or numpy (simplified)
-        # For now, just return original (can add proper rotation later)
-        return x
-
-
 def train_epoch(model, dataloader, criterion, optimizer, device, epoch):
     """Train for one epoch."""
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
+    
+    if len(dataloader) == 0:
+        return 0.0, 0.0
     
     pbar = tqdm(dataloader, desc=f"Epoch {epoch+1} [Train]", ncols=80)
     for batch_idx, (inputs, labels) in enumerate(pbar):
@@ -188,6 +185,9 @@ def validate(model, dataloader, criterion, device):
     running_loss = 0.0
     correct = 0
     total = 0
+    
+    if len(dataloader) == 0:
+        return 0.0, 0.0
     
     with torch.no_grad():
         pbar = tqdm(dataloader, desc="Validation", ncols=80)
@@ -275,6 +275,34 @@ def main():
         default=None,
         help="Resume training from checkpoint"
     )
+    parser.add_argument(
+        "--max-batch-gpu",
+        type=int,
+        default=2,
+        help="Clamp batch size to this value on CUDA (Jetson safety). Default: 2",
+    )
+    parser.add_argument(
+        "--no-gpu-batch-clamp",
+        action="store_true",
+        help="Do not reduce batch size on CUDA (useful on desktop GPUs)",
+    )
+    parser.add_argument(
+        "--min-val-accuracy",
+        type=float,
+        default=60.0,
+        help="Minimum val accuracy %% to mark validation artifact as passing (default: 60)",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (default 0 — avoids RAM/CMA fragmentation on Jetson; try 2-4 on desktop)",
+    )
+    parser.add_argument(
+        "--pin-memory",
+        action="store_true",
+        help="DataLoader pin_memory (mainly useful with --num-workers > 0 on desktop CUDA; costs RAM on Orin)",
+    )
     
     args = parser.parse_args()
     
@@ -289,13 +317,18 @@ def main():
     # For CUDA, set device explicitly and configure memory
     if device.type == "cuda":
         torch.cuda.set_device(0)
-        # Reduce batch size for Jetson if too large (Jetson Orin Nano has limited GPU memory)
-        if args.batch_size > 2:
-            print(f"[WARN] Batch size {args.batch_size} may be too large for Jetson GPU")
-            print(f"[WARN] Reducing to 2 for stability (use gradient accumulation for larger effective batch)")
-            args.batch_size = 2
+        if (
+            not args.no_gpu_batch_clamp
+            and args.batch_size > args.max_batch_gpu
+        ):
+            print(
+                f"[WARN] Reducing batch size from {args.batch_size} to {args.max_batch_gpu} "
+                f"(CUDA); use --no-gpu-batch-clamp for full batch on desktop GPUs"
+            )
+            args.batch_size = args.max_batch_gpu
     
     # Load class labels to determine num_classes
+    class_labels: Dict = {}
     if args.class_labels.exists():
         with open(args.class_labels, 'r') as f:
             class_labels = json.load(f)
@@ -307,6 +340,11 @@ def main():
         num_classes = args.num_classes
     
     print(f"[TRAIN] Number of classes: {num_classes}")
+    pin_mem = bool(args.pin_memory)
+    print(
+        f"[TRAIN] DataLoader num_workers={args.num_workers}, pin_memory={pin_mem} "
+        f"(defaults are Jetson-safe; on desktop try --num-workers 4 --pin-memory)"
+    )
     
     # Create datasets
     train_dataset = SpectrogramDataset(
@@ -319,22 +357,37 @@ def main():
         split="val",
         transform=None  # No augmentation for validation
     )
+    test_dataset = SpectrogramDataset(
+        args.dataset_dir,
+        split="test",
+        transform=None,
+    )
     
     # Create data loaders
+    _dl_common = {
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": pin_mem,
+    }
+    if args.num_workers > 0:
+        _dl_common["persistent_workers"] = True
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True if device.type == "cuda" else False
+        **_dl_common,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=2,
-        pin_memory=True if device.type == "cuda" else False
+        **_dl_common,
     )
+    test_loader = None
+    if len(test_dataset) > 0:
+        test_loader = DataLoader(
+            test_dataset,
+            shuffle=False,
+            **_dl_common,
+        )
     
     # Create model
     model = RFClassifier(num_classes=num_classes)
@@ -357,7 +410,7 @@ def main():
     
     # Resume from checkpoint if specified
     start_epoch = 0
-    best_val_acc = 0.0
+    best_val_acc = float("-inf")
     if args.resume and args.resume.exists():
         print(f"[TRAIN] Resuming from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
@@ -369,7 +422,10 @@ def main():
     
     # Training loop
     print(f"\n[TRAIN] Starting training for {args.epochs} epochs...")
-    print(f"[TRAIN] Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
+    print(
+        f"[TRAIN] Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}, "
+        f"Test samples: {len(test_dataset)}"
+    )
     print(f"[TRAIN] Batch size: {args.batch_size}, Learning rate: {args.learning_rate}")
     print("-" * 80)
     
@@ -396,29 +452,152 @@ def main():
         print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
         print(f"  LR: {scheduler.get_last_lr()[0]:.6f}")
         
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        improved = val_acc > best_val_acc if len(val_dataset) > 0 else False
+        save_last_no_val = len(val_dataset) == 0 and epoch == args.epochs - 1
+        if improved or save_last_no_val:
+            if improved:
+                best_val_acc = val_acc
             args.output_dir.mkdir(parents=True, exist_ok=True)
             model_path = args.output_dir / "rf_classifier.pth"
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_acc': best_val_acc,
+                'best_val_acc': best_val_acc if best_val_acc != float("-inf") else val_acc,
                 'num_classes': num_classes,
                 'train_history': train_history,
-                'val_history': val_history
+                'val_history': val_history,
+                'preprocess_schema': CURRENT_PREPROCESS_SCHEMA,
             }, model_path)
-            print(f"  ✓ Saved best model (val acc: {val_acc:.2f}%) to {model_path}")
+            tag = f"val acc: {val_acc:.2f}%" if len(val_dataset) > 0 else "no val split — last epoch"
+            print(f"  ✓ Saved model ({tag}) to {model_path}")
         
         print("-" * 80)
     
     # Final summary
     print(f"\n[TRAIN] Training complete!")
-    print(f"[TRAIN] Best validation accuracy: {best_val_acc:.2f}%")
-    print(f"[TRAIN] Model saved to: {args.output_dir / 'rf_classifier.pth'}")
-    
+    if best_val_acc == float("-inf"):
+        print("[TRAIN] Best validation accuracy: n/a (no val data)")
+    else:
+        print(f"[TRAIN] Best validation accuracy: {best_val_acc:.2f}%")
+    model_path = args.output_dir / "rf_classifier.pth"
+    print(f"[TRAIN] Model saved to: {model_path}")
+
+    class_to_index = class_labels.get("class_to_index", {}) if class_labels else {}
+    index_to_class = {int(v): k for k, v in class_to_index.items()}
+    validation_path = model_path.with_suffix(".validation.json")
+    modelcard_path = model_path.with_suffix(".modelcard.json")
+
+    validation: Dict = {
+        "model_path": str(model_path),
+        "created_at_unix": time.time(),
+        "validated": False,
+        "reason": "no_model_checkpoint",
+        "thresholds": {"min_val_accuracy_pct": float(args.min_val_accuracy)},
+        "metrics": {},
+    }
+
+    if model_path.exists():
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        criterion_eval = nn.CrossEntropyLoss()
+
+        if len(val_dataset) > 0 and len(val_loader) > 0:
+            val_loss, val_acc, confusion = evaluate_with_confusion(
+                model, val_loader, criterion_eval, device, num_classes=num_classes
+            )
+            pcm = compute_per_class_metrics(confusion)
+            passed = float(val_acc) >= float(args.min_val_accuracy)
+            metrics = {
+                "val_accuracy_pct": float(val_acc),
+                "val_loss": float(val_loss),
+                "macro_f1": pcm["macro_f1"],
+                "macro_precision": pcm["macro_precision"],
+                "macro_recall": pcm["macro_recall"],
+                "confusion_matrix": confusion.tolist(),
+                "per_class": {
+                    index_to_class.get(int(k), f"class_{k}"): v
+                    for k, v in pcm["per_class"].items()
+                },
+                "num_val_batches": len(val_loader),
+            }
+            calib_path = model_path.with_suffix(".calibration.json")
+            try:
+                vl, yl = collect_val_logits(model, val_loader, device)
+                if len(yl) > 0:
+                    T_cal, cal_metrics = fit_temperature(vl, yl)
+                    save_calibration_json(
+                        calib_path, T_cal, cal_metrics, CURRENT_PREPROCESS_SCHEMA
+                    )
+                    metrics["calibration_temperature"] = T_cal
+                    metrics["calibration_val_nll_before"] = cal_metrics.get("nll_before")
+                    metrics["calibration_val_nll_after"] = cal_metrics.get("nll_after")
+                    print(f"[TRAIN] Wrote {calib_path} (temperature={T_cal:.4f})")
+            except Exception as cal_ex:
+                print(f"[TRAIN] Calibration fit skipped: {cal_ex}")
+            if test_loader is not None:
+                t_loss, t_acc, t_conf = evaluate_with_confusion(
+                    model, test_loader, criterion_eval, device, num_classes=num_classes
+                )
+                t_pcm = compute_per_class_metrics(t_conf)
+                metrics["test_accuracy_pct"] = float(t_acc)
+                metrics["test_loss"] = float(t_loss)
+                metrics["test_macro_f1"] = t_pcm["macro_f1"]
+                metrics["test_confusion_matrix"] = t_conf.tolist()
+            validation = {
+                "model_path": str(model_path),
+                "created_at_unix": time.time(),
+                "validated": bool(passed),
+                "reason": "ok" if passed else "val_accuracy_below_threshold",
+                "thresholds": {"min_val_accuracy_pct": float(args.min_val_accuracy)},
+                "metrics": metrics,
+            }
+        else:
+            validation = {
+                "model_path": str(model_path),
+                "created_at_unix": time.time(),
+                "validated": False,
+                "reason": "no_validation_data",
+                "thresholds": {"min_val_accuracy_pct": float(args.min_val_accuracy)},
+                "metrics": {},
+            }
+
+        modelcard = {
+            "schema": "spear_edge.modelcard.v1",
+            "model_path": str(model_path),
+            "model_sha256": sha256_file(model_path),
+            "base_model_path": None,
+            "base_model_sha256": None,
+            "training_type": "full",
+            "preprocess_schema": CURRENT_PREPROCESS_SCHEMA,
+            "num_classes": int(num_classes),
+            "dataset": dataset_fingerprint(args.dataset_dir),
+            "training": {
+                "epochs": int(args.epochs),
+                "batch_size": int(args.batch_size),
+                "learning_rate": float(args.learning_rate),
+                "weight_decay": float(args.weight_decay),
+                "device": str(device),
+            },
+            "runtime": {
+                "python": sys.version,
+                "platform": platform.platform(),
+                "torch_version": torch.__version__,
+                "cuda_available": bool(torch.cuda.is_available()),
+                "cuda_version": str(torch.version.cuda),
+            },
+            "validation": validation,
+        }
+        calib_file = model_path.with_suffix(".calibration.json")
+        if calib_file.exists():
+            modelcard["calibration"] = {"path": str(calib_file)}
+        validation_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+        modelcard_path.write_text(json.dumps(modelcard, indent=2), encoding="utf-8")
+        print(f"[TRAIN] Wrote {validation_path}")
+        print(f"[TRAIN] Wrote {modelcard_path}")
+    else:
+        print("[TRAIN] No checkpoint written (val never improved); skipping validation/modelcard")
+
     return 0
 
 

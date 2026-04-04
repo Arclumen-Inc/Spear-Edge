@@ -22,7 +22,6 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import platform
 import sys
@@ -39,7 +38,14 @@ import random
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from spear_edge.ml.eval import (
+    compute_per_class_metrics,
+    dataset_fingerprint,
+    evaluate_with_confusion,
+    sha256_file,
+)
 from spear_edge.ml.infer_pytorch import RFClassifier
+from spear_edge.ml.preprocess import apply_model_preprocess_v1
 
 
 class SpectrogramDataset(Dataset):
@@ -60,16 +66,17 @@ class SpectrogramDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        # Load spectrogram
         spec_path = self.samples[idx]
-        spec = np.load(spec_path).astype(np.float32)
-        
-        # Ensure correct shape (512, 512)
-        if spec.shape != (512, 512):
-            raise ValueError(f"Expected shape (512, 512), got {spec.shape} for {spec_path}")
-        
-        # Add channel dimension: (512, 512) -> (1, 512, 512)
-        spec = spec[None, :, :]
+        raw = np.load(spec_path)
+        if raw.ndim == 2:
+            spec2 = apply_model_preprocess_v1(raw)
+        elif raw.ndim == 3 and raw.shape[0] == 1:
+            spec2 = apply_model_preprocess_v1(raw[0])
+        else:
+            raise ValueError(
+                f"Expected (512,512) or (1,512,512), got {raw.shape} for {spec_path}"
+            )
+        spec = spec2[None, :, :]
         
         # Apply transforms if provided
         if self.transform:
@@ -233,6 +240,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     correct = 0
     total = 0
     
+    if len(dataloader) == 0:
+        return 0.0, 0.0
+    
     for batch_idx, (data, target) in enumerate(dataloader):
         data, target = data.to(device), target.to(device)
         
@@ -260,6 +270,9 @@ def validate(model, dataloader, criterion, device):
     correct = 0
     total = 0
     
+    if len(dataloader) == 0:
+        return 0.0, 0.0
+    
     with torch.no_grad():
         for data, target in dataloader:
             data, target = data.to(device), target.to(device)
@@ -275,81 +288,6 @@ def validate(model, dataloader, criterion, device):
     accuracy = 100.0 * correct / total
     
     return avg_loss, accuracy
-
-
-def sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def dataset_fingerprint(dataset_dir: Path) -> dict:
-    npy_files = sorted(dataset_dir.rglob("*.npy"))
-    hasher = hashlib.sha256()
-    for p in npy_files:
-        rel = str(p.relative_to(dataset_dir))
-        st = p.stat()
-        hasher.update(f"{rel}:{st.st_size}:{int(st.st_mtime)}".encode("utf-8"))
-    return {
-        "root": str(dataset_dir),
-        "npy_count": len(npy_files),
-        "fingerprint_sha256": hasher.hexdigest(),
-    }
-
-
-def compute_per_class_metrics(confusion: np.ndarray) -> dict:
-    per_class = {}
-    n = confusion.shape[0]
-    for i in range(n):
-        tp = float(confusion[i, i])
-        fp = float(confusion[:, i].sum() - tp)
-        fn = float(confusion[i, :].sum() - tp)
-        support = int(confusion[i, :].sum())
-        precision = (tp / (tp + fp)) if (tp + fp) > 0 else 0.0
-        recall = (tp / (tp + fn)) if (tp + fn) > 0 else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-        per_class[str(i)] = {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "support": support,
-        }
-    macro_f1 = float(np.mean([v["f1"] for v in per_class.values()])) if per_class else 0.0
-    macro_precision = float(np.mean([v["precision"] for v in per_class.values()])) if per_class else 0.0
-    macro_recall = float(np.mean([v["recall"] for v in per_class.values()])) if per_class else 0.0
-    return {
-        "per_class": per_class,
-        "macro_f1": macro_f1,
-        "macro_precision": macro_precision,
-        "macro_recall": macro_recall,
-    }
-
-
-def evaluate_with_confusion(model, dataloader, criterion, device, num_classes: int):
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
-    with torch.no_grad():
-        for data, target in dataloader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            loss = criterion(output, target)
-            total_loss += loss.item()
-            pred = output.argmax(dim=1)
-            correct += pred.eq(target).sum().item()
-            total += target.size(0)
-            t_np = target.cpu().numpy()
-            p_np = pred.cpu().numpy()
-            for t, p in zip(t_np, p_np):
-                if 0 <= int(t) < num_classes and 0 <= int(p) < num_classes:
-                    confusion[int(t), int(p)] += 1
-    avg_loss = (total_loss / len(dataloader)) if len(dataloader) > 0 else 0.0
-    accuracy = (100.0 * correct / total) if total > 0 else 0.0
-    return avg_loss, accuracy, confusion
 
 
 def main():
@@ -674,6 +612,29 @@ def main():
                 "num_val_batches": len(val_loader),
             },
         }
+        try:
+            from spear_edge.ml.calibration import (
+                collect_val_logits,
+                fit_temperature,
+                save_calibration_json,
+            )
+            from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA
+
+            vl, yl = collect_val_logits(model, val_loader, device)
+            if len(yl) > 0:
+                T_cal, cal_metrics = fit_temperature(vl, yl)
+                cp = args.output_path.with_suffix(".calibration.json")
+                save_calibration_json(cp, T_cal, cal_metrics, CURRENT_PREPROCESS_SCHEMA)
+                validation["metrics"]["calibration_temperature"] = T_cal
+                validation["metrics"]["calibration_val_nll_before"] = cal_metrics.get(
+                    "nll_before"
+                )
+                validation["metrics"]["calibration_val_nll_after"] = cal_metrics.get(
+                    "nll_after"
+                )
+                print(f"  Calibration artifact: {cp} (T={T_cal:.4f})")
+        except Exception as e:
+            print(f"  Calibration skipped: {e}")
 
     modelcard = {
         "schema": "spear_edge.modelcard.v1",
@@ -702,6 +663,9 @@ def main():
         },
         "validation": validation,
     }
+    calib_ft = args.output_path.with_suffix(".calibration.json")
+    if calib_ft.exists():
+        modelcard["calibration"] = {"path": str(calib_ft)}
 
     validation_artifact_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
     modelcard_artifact_path.write_text(json.dumps(modelcard, indent=2), encoding="utf-8")

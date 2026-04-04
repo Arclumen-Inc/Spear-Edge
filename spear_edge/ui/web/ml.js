@@ -318,10 +318,10 @@ function updateBatchButtons() {
   btnDeleteSelected.disabled = !hasSelection;
   btnTestModel.disabled = !hasSelection || selectedCaptures.size !== 1;
   
-  // Update Quick Train button
-  const canTrain = hasSelection && 
-                   selectedCaptures.size >= 1 && 
-                   selectedCaptures.size <= 2 &&
+  // Update Quick Train button (API requires 2–12 captures; one may be held out for val)
+  const canTrain = hasSelection &&
+                   selectedCaptures.size >= 2 &&
+                   selectedCaptures.size <= 12 &&
                    trainLabel.value !== "";
   btnQuickTrain.disabled = !canTrain || trainingJobId !== null;
 }
@@ -605,8 +605,8 @@ trainLabel.addEventListener("change", updateBatchButtons);
 // QUICK TRAINING
 // ------------------------------
 async function startQuickTrain() {
-  if (selectedCaptures.size < 1 || selectedCaptures.size > 2) {
-    alert("Please select 1-2 labeled captures for training");
+  if (selectedCaptures.size < 2 || selectedCaptures.size > 12) {
+    alert("Please select 2–12 labeled captures for quick training (one is used for validation when possible).");
     return;
   }
 
@@ -688,7 +688,13 @@ function startTrainingPoll() {
         
         // Show success message
         setTimeout(() => {
-          alert(`Training completed successfully!\n\nModel saved to: ${status.output_path}\n\nRestart application to activate the new model.`);
+          const ae = status.activation_eligible === true;
+          const actHint = ae
+            ? "Validation passed — you can Activate then POST /api/ml/models/reload (or restart) to load weights."
+            : "Validation did not pass default threshold — use Activate with allow_unvalidated if you accept the risk.";
+          alert(
+            `Training completed.\n\nModel: ${status.output_path}\nactivation_eligible: ${ae}\n\n${actHint}`
+          );
           resetTrainingUI();
           // Reload models list
           loadModels();

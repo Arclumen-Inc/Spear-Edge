@@ -163,23 +163,63 @@ pre {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: space-between;
 }
 
-.btn-live-toggle {
-  padding: 6px 12px;
-  font-size: 0.8rem;
+.spectrum-action-buttons {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+/* Primary toolbar actions (Apply SDR, Start/Stop, Capture) */
+.btn-toolbar-primary {
+  background: linear-gradient(180deg, #3cff9e, #2acc6a);
+  color: #041b12;
+  border: 1px solid #3cff9e;
+  border-radius: 8px;
+  padding: 8px 12px;
   font-weight: 600;
-  background: transparent;
-  border: 1px solid var(--accent-green-dim);
-  color: var(--accent-green);
-  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  box-shadow: 0 0 10px rgba(60, 255, 158, 0.35), inset 0 0 6px rgba(0, 0, 0, 0.25);
+  transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
-.btn-live-toggle:hover {
-  background: var(--accent-green-dim);
-  border-color: var(--accent-green);
+/* Native <button> UA styles (font/appearance) can differ from siblings; lock all three to the same box + type. */
+.spectrum-action-buttons button.btn-toolbar-primary {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 7.5rem;
+  text-align: center;
+  font: 600 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.2;
+}
+
+.btn-toolbar-primary:hover {
+  background: #3cff9e;
+  box-shadow: 0 0 14px rgba(60, 255, 158, 0.65), inset 0 0 4px rgba(0, 0, 0, 0.3);
+}
+
+.btn-toolbar-primary:active {
+  transform: translateY(1px);
+}
+
+.btn-toolbar-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .spectrum-controls {
@@ -853,63 +893,6 @@ input[type="range"]:focus::-moz-range-thumb {
 }
 
 .capture-label-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* Apply Button */
-#btnApplySdr {
-  background: linear-gradient(180deg, #00ff88, #00cc6a);
-  color: #041b12;
-  border: 1px solid #00ff88;
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-weight: 600;
-  font-family: monospace;
-  font-size: 12px;
-  cursor: pointer;
-  box-shadow: 0 0 10px rgba(0, 255, 136, 0.35), inset 0 0 6px rgba(0, 0, 0, 0.25);
-  transition: all 0.15s ease;
-}
-
-#btnApplySdr:hover {
-  background: #00ff88;
-  box-shadow: 0 0 14px rgba(0, 255, 136, 0.65), inset 0 0 4px rgba(0, 0, 0, 0.3);
-}
-
-#btnApplySdr:active {
-  transform: translateY(1px);
-}
-
-#btnApplySdr:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-#btnManualCapture {
-  background: linear-gradient(180deg, #3cff9e, #2acc6a);
-  color: #041b12;
-  border: 1px solid #3cff9e;
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-weight: 600;
-  font-family: monospace;
-  font-size: 12px;
-  cursor: pointer;
-  box-shadow: 0 0 10px rgba(60, 255, 158, 0.35), inset 0 0 6px rgba(0, 0, 0, 0.25);
-  transition: all 0.15s ease;
-}
-
-#btnManualCapture:hover {
-  background: #3cff9e;
-  box-shadow: 0 0 14px rgba(60, 255, 158, 0.65), inset 0 0 4px rgba(0, 0, 0, 0.3);
-}
-
-#btnManualCapture:active {
-  transform: translateY(1px);
-}
-
-#btnManualCapture:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

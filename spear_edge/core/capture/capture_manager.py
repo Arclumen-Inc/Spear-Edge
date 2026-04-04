@@ -18,6 +18,8 @@ from spear_edge.core.capture.spectrogram import (
     extract_basic_stats,
 )
 from spear_edge.core.sdr.base import GainMode
+from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA, ml_features_metadata
+
 
 class CaptureManager:
     """
@@ -68,21 +70,23 @@ class CaptureManager:
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             
-            # Try trained model first, then fallback to dummy
-            model_path = Path("spear_edge/ml/models/rf_classifier.pth")
-            if not model_path.exists():
-                model_path = Path("spear_edge/ml/models/rf_classifier_dummy.pth")
-            if model_path.exists():
+            primary = Path("spear_edge/ml/models/rf_classifier.pth")
+            dummy = Path("spear_edge/ml/models/rf_classifier_dummy.pth")
+            model_path = primary if primary.exists() else (dummy if dummy.exists() else None)
+            if model_path is not None:
                 self.classifier = PyTorchRfClassifier(str(model_path))
-                print(f"[CaptureManager] Loaded PyTorch GPU classifier from {model_path}")
-                # Ensure model_path is stored
+                print(
+                    f"[CaptureManager] ML: loaded PyTorch ({CURRENT_PREPROCESS_SCHEMA}) "
+                    f"from {model_path}"
+                )
                 if not hasattr(self.classifier, "model_path") or not self.classifier.model_path:
                     self.classifier.model_path = str(model_path)
             else:
-                # Try creating a new model if no saved model exists
-                print(f"[CaptureManager] PyTorch model not found, creating new model")
-                self.classifier = PyTorchRfClassifier(num_classes=23)  # Use 23 classes from training
-                print("[CaptureManager] Created new PyTorch model")
+                print(
+                    f"[CaptureManager] ML: no PyTorch weights "
+                    f"(expected rf_classifier.pth or rf_classifier_dummy.pth; "
+                    f"{CURRENT_PREPROCESS_SCHEMA}) — ONNX/stub fallback"
+                )
         except ImportError as e:
             print(f"[CaptureManager] PyTorch not available: {e}")
         except Exception as e:
@@ -463,6 +467,7 @@ class CaptureManager:
                             event_payload = {
                                 "label": label,
                                 "confidence": float(confidence),
+                                "uncertain": bool(classification.get("uncertain", False)),
                                 "freq_hz": req.freq_hz,
                                 "source_node": req.source_node,
                                 "scan_plan": req.scan_plan,
@@ -1009,12 +1014,7 @@ class CaptureManager:
         if spectrogram_axes:
             capture_json["spectrogram_axes"] = spectrogram_axes
         
-        # Add ML feature contract metadata (critical for downstream ML)
-        capture_json["ml_features"] = {
-            "spectrogram_shape": [512, 512],
-            "dtype": "float32",
-            "normalized": "noise_floor",
-        }
+        capture_json["ml_features"] = ml_features_metadata()
         
         json_path.write_text(json.dumps(capture_json, indent=2))
 
@@ -1575,11 +1575,6 @@ class CaptureManager:
         if spectrogram_axes:
             capture_json["spectrogram_axes"] = spectrogram_axes
         
-        # Add ML feature contract metadata
-        capture_json["ml_features"] = {
-            "spectrogram_shape": [512, 512],
-            "dtype": "float32",
-            "normalized": "noise_floor",
-        }
+        capture_json["ml_features"] = ml_features_metadata()
         
         json_path.write_text(json.dumps(capture_json, indent=2))

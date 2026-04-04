@@ -8,6 +8,8 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from spear_edge.ml.preprocess import spec_ml_to_single_bchw
+
 try:
     import onnxruntime as ort
     ONNX_AVAILABLE = True
@@ -113,30 +115,7 @@ class ONNXRfClassifier:
             - topk: List of top-k predictions
             - model: "onnx"
         """
-        # Ensure correct dtype
-        x = spec_ml.astype(np.float32)
-        
-        # Handle different input shapes
-        if x.ndim == 2:
-            # (512, 512) -> (1, 1, 512, 512) for CNN
-            x = x[None, None, :, :]
-        elif x.ndim == 3:
-            # (1, 512, 512) -> (1, 1, 512, 512)
-            if x.shape[0] == 1:
-                x = x[None, :, :, :]
-            else:
-                x = x[:, None, :, :]
-        elif x.ndim == 4:
-            # Already (batch, channels, H, W) - verify channels
-            if x.shape[1] != 1:
-                # Assume (batch, H, W, channels) -> transpose
-                x = x.transpose(0, 3, 1, 2)
-        
-        # Validate shape
-        if x.shape[1] != 1 or x.shape[2] != 512 or x.shape[3] != 512:
-            raise ValueError(
-                f"Expected input shape (batch, 1, 512, 512), got {x.shape}"
-            )
+        x = spec_ml_to_single_bchw(spec_ml)
         
         # Run inference
         try:

@@ -43,6 +43,7 @@ data/dataset_raw/
 data/dataset/
 data/rfuav/
 data/rfuav_test/
+data/temp_*/
 *.log
 *.pid
 
@@ -51,6 +52,12 @@ data/rfuav_test/
 *.onnx
 *.h5
 *.pb
+# Generated next to local weights (optional; remove these lines to commit release artifacts)
+spear_edge/ml/models/*.modelcard.json
+spear_edge/ml/models/*.validation.json
+spear_edge/ml/models/*.calibration.json
+spear_edge/ml/models/*.trt
+spear_edge/ml/models/.trt_cache/
 
 # Cursor IDE
 .cursor/

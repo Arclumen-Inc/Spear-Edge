@@ -10,6 +10,9 @@
 # TorchSig (RF signal datasets)
 torchsig
 
+# Tests
+pytest>=7.0.0
+
 # Training dependencies
 numpy>=1.23,<2.0
 scikit-learn>=1.0.0

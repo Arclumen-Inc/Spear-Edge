@@ -1,4 +1,6 @@
 # spear_edge/core/classify/pipeline.py
+# NOTE: Non-runtime stub / reference. Production classification uses
+# spear_edge.ml.infer_pytorch.PyTorchRfClassifier via CaptureManager.
 
 from __future__ import annotations
 from pathlib import Path
