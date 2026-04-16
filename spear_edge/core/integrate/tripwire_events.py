@@ -8,7 +8,7 @@ EDGE Integration Guide for Tripwire v2.0.
 from __future__ import annotations
 
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RfCueEvent(BaseModel):
@@ -70,6 +70,15 @@ class FhssClusterEvent(BaseModel):
     
     class Config:
         allow_population_by_field_name = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coalesce_span_mhz(cls, data: Any) -> Any:
+        """Tripwire MVP emits freq_span_mhz; older payloads used span_mhz."""
+        if isinstance(data, dict):
+            if data.get("span_mhz") is None and data.get("freq_span_mhz") is not None:
+                return {**data, "span_mhz": data.get("freq_span_mhz")}
+        return data
 
 
 class RfEnergyEvent(BaseModel):

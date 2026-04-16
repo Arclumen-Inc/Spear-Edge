@@ -1636,14 +1636,29 @@ function stopNotifyWs() {
   setLed("wsLed", false);
 }
 
-async function startLive() {
-  console.log("[Live] startLive() called");
-  // Optimistic UI: show Stop immediately so the button reflects "live" state
-  if (startBtn) {
+// Live Start/Stop toggle: must stay in sync with backend scan_running (see refreshStatus).
+let liveRunning = false;
+/** While true, status polling must not revert the button to Start before /live/start finishes. */
+let liveStartPending = false;
+
+function setLiveButtonVisual(running) {
+  if (!startBtn) return;
+  if (running) {
     startBtn.textContent = "Stop";
     startBtn.title = "Stop live scan";
+    startBtn.classList.add("live-scan-active");
+  } else {
+    startBtn.textContent = "Start";
+    startBtn.title = "Start or stop live scan";
+    startBtn.classList.remove("live-scan-active");
   }
+}
+
+async function startLive() {
+  console.log("[Live] startLive() called");
+  liveStartPending = true;
   liveRunning = true;
+  setLiveButtonVisual(true);
 
   resizeCanvas(true);
   const cfg = readSdrForm();
@@ -1671,14 +1686,12 @@ async function startLive() {
     console.log("[Live] API.liveStart succeeded:", result);
   } catch (e) {
     console.error("[Live] backend start failed:", e);
-    // Revert button and state on failure
-    if (startBtn) {
-      startBtn.textContent = "Start";
-      startBtn.title = "Start live scan";
-    }
     liveRunning = false;
+    setLiveButtonVisual(false);
     alert(`Failed to start live scan: ${e.message || e}`);
     return;
+  } finally {
+    liveStartPending = false;
   }
 
   console.log("[Live] Starting WebSocket connections...");
@@ -1691,12 +1704,9 @@ async function startLive() {
 
 async function stopLive() {
   console.log("[Live] stopLive() called");
-  // Optimistic UI: show Start immediately
-  if (startBtn) {
-    startBtn.textContent = "Start";
-    startBtn.title = "Start live scan";
-  }
+  liveStartPending = false;
   liveRunning = false;
+  setLiveButtonVisual(false);
 
   // Stop backend scan
   try {
@@ -1720,8 +1730,6 @@ async function stopLive() {
   refreshStatus();
   console.log("[Live] stopLive() completed");
 }
-
-let liveRunning = false;
 
 function toggleLive() {
   if (liveRunning) {
@@ -1870,6 +1878,14 @@ async function refreshStatus() {
     setLed(sdrLed, !!j?.sdr_open);
     setLed(gpsLed, !!j?.gps?.fix && j.gps.fix !== "NO FIX");
     setLed(takLed, !!j?.tak_connected);
+    
+    // Keep Start/Stop button aligned with backend (fixes desync from polling during async start)
+    if (typeof j?.scan_running === "boolean" && !liveStartPending) {
+      if (j.scan_running !== liveRunning) {
+        liveRunning = j.scan_running;
+        setLiveButtonVisual(liveRunning);
+      }
+    }
     
     // Reconnect FFT WebSocket when scan is running but we have no connection (e.g. returned from ML page)
     if (j?.scan_running && (!fftWs || fftWs.readyState !== WebSocket.OPEN)) {

@@ -152,6 +152,15 @@ def bind():
                 "message": "RF spike events are advisory only"
             }
         
+        # Acoustic cues: Edge is RF-only; acknowledge without capture or UI cue
+        if event_type == "audio_cue":
+            print("[INGEST] audio_cue ignored (RF-only Edge)")
+            return {
+                "accepted": True,
+                "action": "ignored_non_rf",
+                "message": "Acoustic cues are not processed on Edge",
+            }
+        
         # IBW calibration and DF events are system events - no capture
         if event_type.startswith("ibw_calibration_") or event_type in ("df_metrics", "df_bearing"):
             print(f"[INGEST] System event {event_type} - no capture")
@@ -258,10 +267,22 @@ def bind():
         gps_alt = payload.get("gps_alt")
         heading_deg = payload.get("heading_deg")
         
-        # For FHSS cluster events, extract additional fields
+        # For FHSS cluster events, extract additional fields (Tripwire MVP: freq_span_mhz)
         hop_count = payload.get("hop_count")
-        span_mhz = payload.get("span_mhz")
+        span_raw = payload.get("span_mhz")
+        if span_raw is None:
+            span_raw = payload.get("freq_span_mhz")
+        span_mhz = None
+        if span_raw is not None:
+            try:
+                span_mhz = float(span_raw)
+            except (TypeError, ValueError):
+                span_mhz = None
         unique_buckets = payload.get("unique_buckets")
+        
+        # Match Tripwire: use cluster span as tune bandwidth when bandwidth_hz absent
+        if bandwidth_hz is None and span_mhz is not None and span_mhz > 0:
+            bandwidth_hz = int(span_mhz * 1e6)
         
         # Preserve all metadata fields per Tripwire v1.1 and v2.0 alignment requirements
         # These are critical for debugging, multi-node correlation, and analyst review
@@ -547,10 +568,14 @@ def bind():
         # Send scan plan command via WebSocket (v2.0 format with command_id)
         import json
         try:
+            use_plan = payload.get("use_plan", True)
+            if isinstance(use_plan, str):
+                use_plan = use_plan.strip().lower() in ("1", "true", "yes", "on")
             msg = {
                 "type": "set_scan_plan",
                 "scan_plan": scan_plan,
                 "command_id": command_id,
+                "use_plan": bool(use_plan),
             }
             await ws.send_text(json.dumps(msg))
             print(f"[TRIPWIRE] Sent scan plan {scan_plan} to {node_id} (command_id={command_id})")
