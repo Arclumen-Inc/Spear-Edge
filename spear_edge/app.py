@@ -91,7 +91,11 @@ def create_app() -> FastAPI:
     state.engine = orchestrator
     state.sdr = sdr
 
-    state.gps = GpsdClient()
+    state.gps = GpsdClient(
+        poll_interval_s=settings.GPS_POLL_INTERVAL_S,
+        host=settings.GPSD_HOST,
+        port=settings.GPSD_PORT,
+    )
     state.gps.start()
 
     # --------------------------------------------------------

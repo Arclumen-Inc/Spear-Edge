@@ -31,4 +31,9 @@ class Settings(BaseModel):
     # Set via env var: SPEAR_DC_REMOVAL=true
     DC_REMOVAL: bool = os.getenv("SPEAR_DC_REMOVAL", "false").lower() in ("true", "1", "yes")
 
+    # GPSD configuration (works with USB GPS or GPIO/UART-backed gpsd sources)
+    GPSD_HOST: str = os.getenv("SPEAR_GPSD_HOST", "127.0.0.1")
+    GPSD_PORT: int = int(os.getenv("SPEAR_GPSD_PORT", "2947"))
+    GPS_POLL_INTERVAL_S: float = float(os.getenv("SPEAR_GPS_POLL_INTERVAL_S", "1.0"))
+
 settings = Settings()

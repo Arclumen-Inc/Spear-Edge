@@ -1876,7 +1876,16 @@ async function refreshStatus() {
     setEdgeMode(j?.mode || "manual");
     j?.task ? setActiveTask(j.task) : clearActiveTask();
     setLed(sdrLed, !!j?.sdr_open);
-    setLed(gpsLed, !!j?.gps?.fix && j.gps.fix !== "NO FIX");
+    const gps = j?.gps || {};
+    const gpsFix = typeof gps.fix === "string" ? gps.fix.toUpperCase() : "";
+    const gpsHasCoords = Number.isFinite(Number(gps.lat)) && Number.isFinite(Number(gps.lon));
+    const gpsHealthy =
+      gpsFix === "2D" ||
+      gpsFix === "3D" ||
+      gpsFix === "DGPS" ||
+      (gpsFix && gpsFix !== "NO FIX") ||
+      (gps.connected && gpsHasCoords);
+    setLed(gpsLed, !!gpsHealthy);
     setLed(takLed, !!j?.tak_connected);
     
     // Keep Start/Stop button aligned with backend (fixes desync from polling during async start)

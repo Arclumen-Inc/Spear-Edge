@@ -168,8 +168,6 @@ class BladeRFNativeDevice(SDRBase):
     """
 
     def __init__(self, device_args: Optional[Dict[str, Any]] = None):
-        if _libbladerf is None:
-            raise RuntimeError("libbladerf not available - cannot use native backend")
 
         super().__init__()
 
@@ -230,11 +228,66 @@ class BladeRFNativeDevice(SDRBase):
         # Overflow counter to prevent log storms
         self._overflow_count = 0
 
-        # Open device
-        self._open_device()
+        # Availability / reconnect state (field-device resilience)
+        self._lib_available: bool = _libbladerf is not None
+        self._last_error: Optional[str] = None
+        self._last_error_ts: float = 0.0
+        self._last_reconnect_attempt_ts: float = 0.0
+        self._reconnect_interval_s: float = 2.0
+
+        if not self._lib_available:
+            self._last_error = "libbladerf_not_available"
+            logger.warning("BladeRFNativeDevice initialized without libbladerf; running in degraded mode")
+            return
+
+        # Best effort open on startup (do not crash service if hardware absent)
+        self.open()
+
+    @property
+    def connected(self) -> bool:
+        return self.dev is not None
+
+    def _mark_disconnected(self, reason: str) -> None:
+        """Move device to disconnected state without raising."""
+        self._last_error = reason
+        self._last_error_ts = time.time()
+        self._stream_active = False
+        self._stream_configured = False
+        self.dual_channel_mode = False
+        if self.dev is not None:
+            try:
+                _libbladerf.bladerf_close(self.dev)
+            except Exception:
+                pass
+            self.dev = None
+
+    def _maybe_reconnect(self) -> bool:
+        """Try reconnecting periodically; restore previous tuning if possible."""
+        if not self._lib_available:
+            return False
+        now = time.time()
+        if (now - self._last_reconnect_attempt_ts) < self._reconnect_interval_s:
+            return False
+        self._last_reconnect_attempt_ts = now
+        try:
+            self._open_device()
+            if self.sample_rate_sps > 0 and self.center_freq_hz > 0:
+                self.tune(
+                    center_freq_hz=self.center_freq_hz,
+                    sample_rate_sps=self.sample_rate_sps,
+                    bandwidth_hz=self.bandwidth_hz,
+                    dual_channel=self.dual_channel_mode,
+                )
+            return self.dev is not None
+        except Exception as e:
+            self._mark_disconnected(f"reconnect_failed: {e}")
+            logger.debug(f"bladeRF reconnect attempt failed: {e}")
+            return False
 
     def _open_device(self) -> None:
         """Open bladeRF device using libbladerf."""
+        if not self._lib_available:
+            return
         if self.dev is not None:
             return
 
@@ -251,6 +304,7 @@ class BladeRFNativeDevice(SDRBase):
             raise RuntimeError(f"Failed to open bladeRF device: {error_str} (code: {ret})")
 
         self.dev = dev_ptr
+        self._last_error = None
         logger.info("BladeRFNativeDevice: Device opened successfully")
         
         # Query firmware and FPGA versions
@@ -269,8 +323,15 @@ class BladeRFNativeDevice(SDRBase):
 
     def open(self) -> None:
         """Open device (already opened in __init__)."""
+        if not self._lib_available:
+            return
         if self.dev is None:
-            self._open_device()
+            try:
+                self._open_device()
+            except Exception as e:
+                self._mark_disconnected(str(e))
+                logger.warning(f"BladeRF open failed (degraded mode): {e}")
+                return
             # CRITICAL: Ensure BT200 is OFF (hardware not connected)
             # BT200 should only be enabled if user explicitly sets it
             for ch in range(self.max_rx_channels):
@@ -312,7 +373,8 @@ class BladeRFNativeDevice(SDRBase):
             dual_channel: If True, configure both channels for dual RX mode
         """
         if self.dev is None:
-            return
+            if not self._maybe_reconnect():
+                return
 
         self.center_freq_hz = int(center_freq_hz)
         self.sample_rate_sps = int(sample_rate_sps)
@@ -1006,6 +1068,8 @@ class BladeRFNativeDevice(SDRBase):
         # CRITICAL: Check stream state FIRST to prevent segfault during device close/reopen
         # Check _stream_active before dev to avoid race condition
         if not self._stream_active or self.dev is None:
+            if self.dev is None:
+                self._maybe_reconnect()
             return np.empty(0, dtype=np.complex64)
 
         n = int(num_samples)
@@ -1080,6 +1144,7 @@ class BladeRFNativeDevice(SDRBase):
                 self._health_stats["error_reads"] += 1
                 error_str = _libbladerf.bladerf_strerror(ret).decode('utf-8', errors='ignore')
                 logger.debug(f"bladerf_sync_rx error: {error_str} (code: {ret})")
+                self._mark_disconnected(f"sync_rx_error: {error_str} ({ret})")
             return np.empty(0, dtype=np.complex64)
 
         # Successful read
@@ -1316,7 +1381,9 @@ class BladeRFNativeDevice(SDRBase):
         # Determine status
         # Note: success_rate excludes timeouts (timeouts don't count as errors)
         # Timeouts are environmental issues, not device failures
-        if success_rate >= 95.0 and stats["overflow_errors"] == 0:
+        if not self.connected:
+            status = "disconnected"
+        elif success_rate >= 95.0 and stats["overflow_errors"] == 0:
             status = "good"
         elif success_rate >= 80.0:
             status = "fair"
@@ -1327,6 +1394,8 @@ class BladeRFNativeDevice(SDRBase):
 
         return {
             "status": status,
+            "connected": self.connected,
+            "last_error": self._last_error,
             "success_rate_pct": round(success_rate, 1),
             "throughput_mbps": round(throughput_mbps, 2),
             "samples_per_sec": round(samples_per_sec / 1_000_000, 2),  # MS/s
@@ -1384,6 +1453,9 @@ class BladeRFNativeDevice(SDRBase):
         info = {
             "driver": "bladerf_native",
             "label": "bladeRF 2.0 (Native)",
+            "connected": self.connected,
+            "lib_available": self._lib_available,
+            "last_error": self._last_error,
             "serial": "unknown",  # Can query from device if needed
             "rx_channels": self.max_rx_channels,
             "supports_agc": self.supports_agc,

@@ -149,7 +149,7 @@ class Orchestrator:
         if self._open:
             return
         self.sdr.open()
-        self._open = True
+        self._open = bool(getattr(self.sdr, "connected", True))
 
     async def close(self) -> None:
         """Gracefully shutdown orchestrator - stop all tasks and close SDR."""
@@ -768,9 +768,11 @@ class Orchestrator:
     # Status (must never throw)
     # -------------------------------------------------
     def status(self) -> Dict[str, Any]:
+        sdr_connected = bool(getattr(self.sdr, "connected", self._open and self.sdr is not None))
         return {
             "mode": self.mode,
             "sdr_open": self._open,
+            "sdr_connected": sdr_connected,
             "scan_running": bool(self._scan and self._scan.is_running()),
             "last_frame_ts": self._last_frame_ts,
             "running_job": self._job,

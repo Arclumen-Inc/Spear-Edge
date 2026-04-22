@@ -11,16 +11,19 @@ def health():
 def status():
     scan_running = False
     mode = "manual"
+    sdr_open = False
     try:
         if getattr(state, "engine", None) is not None:
             scan_running = state.engine.status().get("scan_running", False)
             mode = getattr(state.engine, "mode", "manual")
+        if getattr(state, "sdr", None) is not None:
+            sdr_open = bool(getattr(state.sdr, "connected", True))
     except Exception:
         pass
     return {
         "ok": True,
         "mode": mode,
-        "sdr_open": state.sdr is not None,
+        "sdr_open": sdr_open,
         "scan_running": scan_running,
         "gps": state.gps.get_status() if state.gps else None,
     }

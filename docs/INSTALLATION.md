@@ -148,6 +148,11 @@ SPEAR_FPS=15.0
 # RF calibration
 SPEAR_CALIBRATION_OFFSET_DB=0.0
 SPEAR_IQ_SCALING_MODE=int16
+
+# GPSD connection (USB or GPIO/UART-backed gpsd)
+SPEAR_GPSD_HOST=127.0.0.1
+SPEAR_GPSD_PORT=2947
+SPEAR_GPS_POLL_INTERVAL_S=1.0
 ```
 
 ### Settings File
@@ -198,6 +203,16 @@ sudo usermod -a -G plugdev,dialout $USER
 1. Check GPS device: `ls /dev/tty* | grep -i gps`
 2. Start gpsd: `sudo systemctl start gpsd`
 3. Configure gpsd: `sudo gpsd /dev/ttyUSB0 -F /var/run/gpsd.sock`
+
+For Jetson GPIO/UART GPS (for example `/dev/ttyTHS1`), point gpsd at the UART device:
+
+```bash
+sudo systemctl stop gpsd.socket gpsd
+sudo gpsd /dev/ttyTHS1 -n -F /var/run/gpsd.sock
+gpsmon
+```
+
+If you need this persistent across reboot, set the device in gpsd defaults/systemd drop-in and restart gpsd.
 
 ### Port Already in Use
 
