@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import socket
 import struct
 import threading
@@ -136,6 +137,7 @@ class CoTBroadcaster:
         self.interval_s = interval_s
 
         self._gps_cache: Dict[str, Any] = {}
+        self._last_mc_iface_warn_ts: float = 0.0
 
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
@@ -170,11 +172,20 @@ class CoTBroadcaster:
     # ------------------------------------------------------------------
 
     def send_event(self, xml: str):
+        interfaces = self._get_interfaces()
+        if not interfaces:
+            now = time.time()
+            if now - self._last_mc_iface_warn_ts >= 60.0:
+                self._last_mc_iface_warn_ts = now
+                logging.getLogger(__name__).warning(
+                    "[CoT] No non-loopback IPv4 interfaces for multicast; "
+                    "position/events may not reach ATAK (check networking / WiFi / Ethernet)."
+                )
         data = xml.encode("utf-8")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", MC_TTL))
         try:
-            for _, ip in self._get_interfaces():
+            for _, ip in interfaces:
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
                 sock.sendto(data, (POS_MC_ADDR, POS_MC_PORT))
         finally:
@@ -191,8 +202,11 @@ class CoTBroadcaster:
 
         if lat is None or lon is None:
             lat, lon, alt_m = 0.0, 0.0, 0.0
+            how = "m-p"
         else:
             alt_m = float(alt_ft or 0.0) * 0.3048
+            fix = str(self._gps_cache.get("gps_fix") or "").upper()
+            how = "h-g-i-g-o" if fix in ("2D", "3D") else "m-p"
 
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         stale = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 30))
@@ -200,7 +214,7 @@ class CoTBroadcaster:
         return f"""<event version="2.0"
   uid="{self.uid}"
   type="a-f-G-E-S-E"
-  how="m-p"
+  how="{how}"
   time="{now}"
   start="{now}"
   stale="{stale}">

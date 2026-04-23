@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 import threading
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 
 try:
     from gps import gps, WATCH_ENABLE, WATCH_NEWSTYLE
@@ -17,10 +17,17 @@ class GpsdClient:
     Threaded, poll-based, non-blocking for async apps.
     """
 
-    def __init__(self, poll_interval_s: float = 1.0, host: str = "127.0.0.1", port: int = 2947):
+    def __init__(
+        self,
+        poll_interval_s: float = 1.0,
+        host: str = "127.0.0.1",
+        port: int = 2947,
+        on_fix: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
         self.poll_interval_s = poll_interval_s
         self.host = host
         self.port = int(port)
+        self.on_fix = on_fix
 
         self.session = None
         self.last_fix: Dict[str, Any] = {}
@@ -135,5 +142,10 @@ class GpsdClient:
                 "gps_time": time.strftime("%H:%M:%SZ", time.gmtime()),
             }
             self.last_update = time.time()
+            if self.on_fix:
+                try:
+                    self.on_fix(dict(self.last_fix))
+                except Exception:
+                    pass
 
             time.sleep(self.poll_interval_s)

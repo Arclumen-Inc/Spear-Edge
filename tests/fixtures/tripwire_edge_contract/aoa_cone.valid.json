@@ -1,0 +1,22 @@
+{
+  "schema": "spear.tripwire.event.v1",
+  "node_id": "tripwire-02",
+  "callsign": "TW-02",
+  "gps": {
+    "fix": "3D",
+    "lat": 37.7755,
+    "lon": -122.4181,
+    "alt_ft": 90.0
+  },
+  "meta": {
+    "sdr_driver": "bladerf"
+  },
+  "type": "aoa_cone",
+  "stage": "confirmed",
+  "timestamp": 1710000005.0,
+  "bearing_deg": 74.0,
+  "cone_width_deg": 25.0,
+  "confidence": 78.0,
+  "status": "active",
+  "scan_plan": "auto_aoa"
+}

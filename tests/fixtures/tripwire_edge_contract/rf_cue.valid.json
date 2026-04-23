@@ -1,0 +1,22 @@
+{
+  "schema": "spear.tripwire.event.v1",
+  "node_id": "tripwire-01",
+  "callsign": "TW-01",
+  "gps": {
+    "fix": "3D",
+    "lat": 37.7749,
+    "lon": -122.4194,
+    "alt_ft": 95.0
+  },
+  "meta": {
+    "sdr_driver": "bladerf"
+  },
+  "type": "rf_cue",
+  "stage": "cue",
+  "timestamp": 1710000000.0,
+  "freq_hz": 915000000.0,
+  "confidence": 0.82,
+  "classification": "rf_activity",
+  "scan_plan": "fhss_subghz",
+  "bandwidth_hz": 50000.0
+}

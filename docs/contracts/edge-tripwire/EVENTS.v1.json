@@ -1,0 +1,192 @@
+{
+  "contract": "edge-tripwire-event-interface",
+  "version": "v1",
+  "status": "active",
+  "last_updated_utc": "2026-04-23T00:00:00Z",
+  "owners": {
+    "producer": "Tripwire (contract authority)",
+    "consumer": "Edge (contract follower)"
+  },
+  "envelope": {
+    "required_fields": [
+      "schema",
+      "node_id",
+      "callsign",
+      "type",
+      "timestamp"
+    ],
+    "schema_literal": "spear.tripwire.event.v1",
+    "gps_field": "gps",
+    "gps_fields": [
+      "lat",
+      "lon",
+      "alt_ft"
+    ]
+  },
+  "global_constraints": {
+    "time_unit": "unix_epoch_seconds",
+    "bearing_unit": "degrees_clockwise_from_north",
+    "frequency_unit": "hz",
+    "lob_frequency_unit": "mhz",
+    "coordinate_system": "WGS84 lat/lon decimal degrees",
+    "confidence_scale": "0_to_1_for_rf_events; 0_to_100_for_aoa_and_bearing_line_until_normalized",
+    "event_discriminator_preference": "type",
+    "legacy_event_discriminator_alias": "event_type"
+  },
+  "entities": {
+    "rf_cue": {
+      "required": [
+        "type",
+        "freq_hz",
+        "timestamp"
+      ],
+      "optional": [
+        "stage",
+        "confidence",
+        "classification",
+        "scan_plan",
+        "bandwidth_hz",
+        "delta_db",
+        "event_id",
+        "event_group_id"
+      ],
+      "constraints": {
+        "type": {
+          "equals": "rf_cue"
+        },
+        "freq_hz": {
+          "type": "number",
+          "gt": 0
+        },
+        "confidence": {
+          "type": "number",
+          "min": 0.0,
+          "max": 1.0
+        }
+      }
+    },
+    "fhss_cluster": {
+      "required": [
+        "type",
+        "freq_hz",
+        "timestamp"
+      ],
+      "optional": [
+        "hop_count",
+        "unique_buckets",
+        "freq_span_mhz",
+        "span_mhz",
+        "confidence",
+        "classification",
+        "scan_plan",
+        "bandwidth_hz"
+      ],
+      "constraints": {
+        "type": {
+          "equals": "fhss_cluster"
+        },
+        "freq_hz": {
+          "type": "number",
+          "gt": 0
+        },
+        "confidence": {
+          "type": "number",
+          "min": 0.0,
+          "max": 1.0
+        }
+      },
+      "aliases": {
+        "span_mhz_aliases": [
+          "freq_span_mhz",
+          "span_mhz"
+        ]
+      }
+    },
+    "aoa_cone": {
+      "required": [
+        "type",
+        "bearing_deg",
+        "cone_width_deg",
+        "timestamp"
+      ],
+      "optional": [
+        "confidence",
+        "status",
+        "scan_plan",
+        "classification",
+        "source_type",
+        "center_freq_mhz",
+        "bearing_std_deg"
+      ],
+      "constraints": {
+        "type": {
+          "equals": "aoa_cone"
+        },
+        "bearing_deg": {
+          "type": "number",
+          "min": 0,
+          "max": 360
+        },
+        "cone_width_deg": {
+          "type": "number",
+          "gt": 0,
+          "max": 180
+        },
+        "confidence": {
+          "type": "number",
+          "min": 0.0,
+          "max": 100.0
+        }
+      }
+    },
+    "bearing_line": {
+      "required": [
+        "type",
+        "bearing_deg",
+        "timestamp",
+        "gps"
+      ],
+      "optional": [
+        "tripwire_id",
+        "node_id",
+        "confidence",
+        "signal_strength_db",
+        "null_bearing_deg",
+        "cone_width_deg",
+        "bearing_std_deg",
+        "signal_freq_mhz"
+      ],
+      "constraints": {
+        "type": {
+          "equals": "bearing_line"
+        },
+        "bearing_deg": {
+          "type": "number",
+          "min": 0,
+          "max": 360
+        },
+        "confidence": {
+          "type": "number",
+          "min": 0.0,
+          "max": 100.0
+        },
+        "gps.lat": {
+          "type": "number",
+          "min": -90,
+          "max": 90
+        },
+        "gps.lon": {
+          "type": "number",
+          "min": -180,
+          "max": 180
+        }
+      },
+      "aliases": {
+        "node_identity_aliases": [
+          "tripwire_id",
+          "node_id"
+        ]
+      }
+    }
+  }
+}

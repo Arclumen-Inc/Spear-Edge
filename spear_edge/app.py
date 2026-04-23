@@ -95,6 +95,7 @@ def create_app() -> FastAPI:
         poll_interval_s=settings.GPS_POLL_INTERVAL_S,
         host=settings.GPSD_HOST,
         port=settings.GPSD_PORT,
+        on_fix=lambda fix: orchestrator.cot.update_gps(fix),
     )
     state.gps.start()
 

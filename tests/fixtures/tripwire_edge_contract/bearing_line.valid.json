@@ -1,0 +1,24 @@
+{
+  "schema": "spear.tripwire.event.v1",
+  "node_id": "tripwire-03",
+  "callsign": "TW-03",
+  "gps": {
+    "fix": "3D",
+    "lat": 37.7761,
+    "lon": -122.4172,
+    "alt_ft": 88.0
+  },
+  "meta": {
+    "sdr_driver": "bladerf"
+  },
+  "type": "bearing_line",
+  "timestamp": 1710000010.0,
+  "tripwire_id": "TW-03",
+  "bearing_deg": 118.5,
+  "confidence": 72.0,
+  "signal_strength_db": -47.2,
+  "null_bearing_deg": 298.5,
+  "cone_width_deg": 14.0,
+  "bearing_std_deg": 3.5,
+  "signal_freq_mhz": 915.0
+}
