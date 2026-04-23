@@ -51,6 +51,8 @@ const wsLed             = document.getElementById("wsLed");
 const sdrLed            = document.getElementById("sdrLed");
 const gpsLed            = document.getElementById("gpsLed");
 const takLed            = document.getElementById("takLed");
+const gpsTopBarTimeEl   = document.getElementById("gpsTopBarTime");
+const gpsTopBarPosEl    = document.getElementById("gpsTopBarPos");
 
 const freqInput         = document.getElementById("freqInput");       // MHz
 const rateInput         = document.getElementById("rateInput");       // MS/s
@@ -1886,6 +1888,16 @@ async function refreshStatus() {
       (gpsFix && gpsFix !== "NO FIX") ||
       (gps.connected && gpsHasCoords);
     setLed(gpsLed, !!gpsHealthy);
+    if (gpsTopBarTimeEl) {
+      gpsTopBarTimeEl.textContent = gps.time || "--:--:--Z";
+    }
+    if (gpsTopBarPosEl) {
+      if (gpsHasCoords) {
+        gpsTopBarPosEl.textContent = `Lat ${Number(gps.lat).toFixed(6)}, Lon ${Number(gps.lon).toFixed(6)}`;
+      } else {
+        gpsTopBarPosEl.textContent = "Lat ---.------, Lon ---.------";
+      }
+    }
     setLed(takLed, !!j?.tak_connected);
     
     // Keep Start/Stop button aligned with backend (fixes desync from polling during async start)
@@ -1913,6 +1925,8 @@ async function refreshStatus() {
     }
   } catch (_) {
     if (statusEl) statusEl.textContent = "Status unavailable";
+    if (gpsTopBarTimeEl) gpsTopBarTimeEl.textContent = "--:--:--Z";
+    if (gpsTopBarPosEl) gpsTopBarPosEl.textContent = "Lat ---.------, Lon ---.------";
   }
 }
 

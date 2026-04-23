@@ -469,6 +469,29 @@ pre {
   box-shadow: 0 0 10px rgba(60, 255, 158, 0.35);
 }
 
+.gps-topbar-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 230px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(10, 15, 22, 0.65);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  font-family: monospace;
+}
+
+#gpsTopBarTime {
+  color: var(--text-main);
+}
+
+#gpsTopBarPos {
+  color: var(--accent-green);
+}
+
 /* Forms */
 .form-grid {
   display: grid;
