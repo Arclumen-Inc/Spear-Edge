@@ -537,6 +537,7 @@ let lastGainSliderInputAt = 0;
 const GAIN_SLIDER_GRACE_MS = 1500;
 let lastRxPathSelectAt = 0;
 const RX_PATH_GRACE_MS = 1500;
+let sdrFormHydratedFromBackend = false;
 
 async function applySdrConfig() {
   if (edgeMode === "tasked") return;
@@ -1789,6 +1790,31 @@ function updateSdrStatus(info) {
     const ch = Number(cfg.rx_channel) === 1 ? 1 : 0;
     rxPathSelect.value = String(ch);
   }
+  
+  // One-time hydration after page load/navigation:
+  // keep manual-capture form aligned with backend SDR state instead of HTML defaults.
+  if (!sdrFormHydratedFromBackend) {
+    if (Number.isFinite(Number(cfg.center_freq_hz)) && freqInput) {
+      freqInput.value = (Number(cfg.center_freq_hz) / 1e6).toFixed(3);
+    }
+    if (Number.isFinite(Number(cfg.sample_rate_sps)) && rateInput) {
+      rateInput.value = (Number(cfg.sample_rate_sps) / 1e6).toFixed(2);
+    }
+    if (bandwidthInput) {
+      if (Number.isFinite(Number(cfg.bandwidth_hz)) && Number(cfg.bandwidth_hz) > 0) {
+        bandwidthInput.value = (Number(cfg.bandwidth_hz) / 1e6).toFixed(2);
+      } else {
+        bandwidthInput.value = "";
+      }
+    }
+    if (gainModeSelect && typeof cfg.gain_mode === "string") {
+      const normalized = cfg.gain_mode.toLowerCase();
+      const hasOption = Array.from(gainModeSelect.options).some((o) => o.value === normalized);
+      if (hasOption) gainModeSelect.value = normalized;
+    }
+    sdrFormHydratedFromBackend = true;
+  }
+
   if (sdrCenterEl) sdrCenterEl.textContent = cfg.center_freq_hz ? (cfg.center_freq_hz / 1e6).toFixed(3) + " MHz" : "—";
   if (sdrRateEl) sdrRateEl.textContent = cfg.sample_rate_sps ? (cfg.sample_rate_sps / 1e6).toFixed(2) + " MS/s" : "—";
   if (sdrGainEl) sdrGainEl.textContent = (cfg.gain_db !== undefined) ? (cfg.gain_db + " dB") : "—";
@@ -1905,6 +1931,20 @@ async function refreshStatus() {
       if (j.scan_running !== liveRunning) {
         liveRunning = j.scan_running;
         setLiveButtonVisual(liveRunning);
+      }
+    }
+    
+    // One-time hydration for scan/UI-only controls not included in /live/sdr/info.
+    if (!sdrFormHydratedFromBackend) {
+      if (fftSizeSelect && Number.isFinite(Number(j?.fft_size))) {
+        const fftVal = String(Number(j.fft_size));
+        const hasFftOption = Array.from(fftSizeSelect.options).some((o) => o.value === fftVal);
+        if (hasFftOption) fftSizeSelect.value = fftVal;
+      }
+      if (fpsSelect && Number.isFinite(Number(j?.fps))) {
+        const fpsVal = String(Number(j.fps));
+        const hasFpsOption = Array.from(fpsSelect.options).some((o) => o.value === fpsVal);
+        if (hasFpsOption) fpsSelect.value = fpsVal;
       }
     }
     
