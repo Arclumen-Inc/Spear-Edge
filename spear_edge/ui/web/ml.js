@@ -30,6 +30,10 @@ const trainProgressFill = document.getElementById("trainProgressFill");
 const trainStatus = document.getElementById("trainStatus");
 
 const mlStats = document.getElementById("mlStats");
+const imagePreviewModal = document.getElementById("imagePreviewModal");
+const imagePreviewImg = document.getElementById("imagePreviewImg");
+const imagePreviewTitle = document.getElementById("imagePreviewTitle");
+const imagePreviewClose = document.getElementById("imagePreviewClose");
 
 // ------------------------------
 // STATE
@@ -326,6 +330,25 @@ function updateBatchButtons() {
   btnQuickTrain.disabled = !canTrain || trainingJobId !== null;
 }
 
+function openImagePreview(imageUrl, captureDir) {
+  if (!imagePreviewModal || !imagePreviewImg) return;
+
+  imagePreviewImg.src = imageUrl;
+  imagePreviewTitle.textContent = captureDir || "Spectrogram preview";
+  imagePreviewModal.classList.add("open");
+  imagePreviewModal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+}
+
+function closeImagePreview() {
+  if (!imagePreviewModal || !imagePreviewImg) return;
+
+  imagePreviewModal.classList.remove("open");
+  imagePreviewModal.setAttribute("aria-hidden", "true");
+  imagePreviewImg.src = "";
+  document.body.style.overflow = "";
+}
+
 // ------------------------------
 // MODEL MANAGEMENT
 // ------------------------------
@@ -600,6 +623,38 @@ btnTestModel.addEventListener("click", testModel);
 btnQuickTrain.addEventListener("click", startQuickTrain);
 btnCancelTrain.addEventListener("click", cancelTraining);
 trainLabel.addEventListener("change", updateBatchButtons);
+
+captureGrid.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  if (!target.classList.contains("capture-thumb")) return;
+
+  const imageUrl = target.getAttribute("src");
+  if (!imageUrl) return;
+
+  const captureCard = target.closest(".capture-card");
+  const captureDir = captureCard?.getAttribute("data-capture-dir") || "Spectrogram preview";
+  openImagePreview(imageUrl, captureDir);
+});
+
+if (imagePreviewClose) {
+  imagePreviewClose.addEventListener("click", closeImagePreview);
+}
+
+if (imagePreviewModal) {
+  imagePreviewModal.addEventListener("click", (event) => {
+    if (event.target === imagePreviewModal) {
+      closeImagePreview();
+    }
+  });
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && imagePreviewModal?.classList.contains("open")) {
+    closeImagePreview();
+  }
+});
 
 // ------------------------------
 // QUICK TRAINING

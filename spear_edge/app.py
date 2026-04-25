@@ -35,12 +35,14 @@ from spear_edge.api.http.routes_tasking import bind as bind_tasking
 from spear_edge.api.http.routes_tripwire import bind as bind_tripwire
 from spear_edge.api.http.routes_edge_mode import bind as bind_edge_mode
 from spear_edge.api.http.routes_network import router as network_router
+from spear_edge.api.http.routes_wifi_monitor import bind as bind_wifi_monitor
 
 from spear_edge.api.ws.live_fft_ws import live_fft_ws
 from spear_edge.api.ws.events_ws import events_ws
 
 from spear_edge.core import state
 from spear_edge.core.gps.gpsd import GpsdClient
+from spear_edge.core.wifi_monitor import WifiMonitorConfig, WifiMonitorManager
 
 from spear_edge.api.ws.tripwire_link_ws import tripwire_link_ws
 
@@ -85,11 +87,38 @@ def create_app() -> FastAPI:
     app.state.orchestrator = orchestrator
     app.state.capture_manager = capture_manager
 
+    hop_channels = []
+    for token in str(settings.WIFI_MONITOR_HOP_CHANNELS).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            hop_channels.append(int(token))
+        except ValueError:
+            pass
+    if not hop_channels:
+        hop_channels = [1, 6, 11, 36, 44, 149]
+    wifi_cfg = WifiMonitorConfig(
+        enabled=False,
+        backend=settings.WIFI_MONITOR_BACKEND,
+        iface=settings.WIFI_MONITOR_IFACE,
+        channel_mode=settings.WIFI_MONITOR_CHANNEL_MODE,
+        hop_channels=hop_channels,
+        poll_interval_s=settings.WIFI_MONITOR_POLL_INTERVAL_S,
+        kismet_cmd=settings.WIFI_MONITOR_KISMET_CMD,
+        kismet_url=settings.WIFI_MONITOR_KISMET_URL,
+        kismet_username=settings.WIFI_MONITOR_KISMET_USERNAME,
+        kismet_password=settings.WIFI_MONITOR_KISMET_PASSWORD,
+        kismet_timeout_s=settings.WIFI_MONITOR_KISMET_TIMEOUT_S,
+    )
+    app.state.wifi_monitor = WifiMonitorManager(orchestrator.bus, wifi_cfg, cot=orchestrator.cot)
+
     # --------------------------------------------------------
     # Global shared state (legacy-safe)
     # --------------------------------------------------------
     state.engine = orchestrator
     state.sdr = sdr
+    state.wifi_monitor = app.state.wifi_monitor
 
     state.gps = GpsdClient(
         poll_interval_s=settings.GPS_POLL_INTERVAL_S,
@@ -110,6 +139,7 @@ def create_app() -> FastAPI:
     app.include_router(bind_capture(orchestrator))
     app.include_router(ml_router)
     app.include_router(network_router)
+    app.include_router(bind_wifi_monitor())
     # --------------------------------------------------------
     # WEBSOCKET ROUTES (⚠️ MUST COME BEFORE StaticFiles)
     # --------------------------------------------------------
@@ -155,6 +185,19 @@ def create_app() -> FastAPI:
         else:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail=f"ML dashboard not found at {ml_html_path.resolve()}")
+
+    @app.get("/wifi")
+    async def wifi_dashboard():
+        from fastapi.responses import FileResponse
+        from pathlib import Path
+
+        wifi_html_path = Path("spear_edge/ui/web/wifi.html")
+        if wifi_html_path.exists():
+            return FileResponse(str(wifi_html_path.resolve()), media_type="text/html")
+        else:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail=f"Wi-Fi dashboard not found at {wifi_html_path.resolve()}")
         
     # --------------------------------------------------------
     # STATIC UI (⚠️ MUST BE LAST)
@@ -176,6 +219,11 @@ def create_app() -> FastAPI:
         if orchestrator.mode == "armed":
             count = orchestrator._count_connected_tripwires()
             orchestrator._send_atak_status(online=True, tripwire_count=count)
+        if settings.WIFI_MONITOR_AUTOSTART:
+            try:
+                await app.state.wifi_monitor.start()
+            except Exception as e:
+                print(f"[WIFI MONITOR] Autostart failed: {e}")
         
         # Register signal handler to stop scan immediately on SIGINT/SIGTERM
         # This allows graceful shutdown on first Ctrl+C instead of waiting
@@ -223,6 +271,13 @@ def create_app() -> FastAPI:
         except Exception:
             pass
         
+        # Stop capture manager first (it might be holding SDR resources)
+        try:
+            print("[SHUTDOWN] Stopping Wi-Fi monitor...")
+            await app.state.wifi_monitor.stop()
+        except Exception as e:
+            print(f"[SHUTDOWN] WARNING: wifi monitor stop error: {e}")
+
         # Stop capture manager first (it might be holding SDR resources)
         try:
             if hasattr(capture_manager, "stop"):

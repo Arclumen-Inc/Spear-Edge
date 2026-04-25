@@ -12,6 +12,18 @@ WorkingDirectory=/home/spear/spear-edgev1_0
 
 Environment=PYTHONUNBUFFERED=1
 Environment=SPEAR_LOG_LEVEL=INFO
+Environment=SPEAR_RID_DECODER_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/rid_decode_wrapper.py
+Environment=SPEAR_DJI_DECODER_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/dji_decode_wrapper.py
+Environment=SPEAR_RID_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/rid_backend_stub.py
+Environment=SPEAR_DJI_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/dji_backend_stub.py
+# Live DJI DroneID (Occusync 2.0) from IQ via samples2djidroneid — build image from:
+#   https://github.com/anarkiwi/samples2djidroneid
+# Capture must be 15.36 Msps or 30.72 Msps. Use ONE quoted Environment= line in the real unit if paths have spaces.
+# Environment=SPEAR_DJI_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/dji_samples2droneid_backend.py
+# Environment=SPEAR_DJI_SAMPLES2_DOCKER_IMAGE=samples2djidroneid
+# Live ASTM Remote ID from a PCAP sidecar next to samples.iq (see docs/USER_GUIDE.md):
+# Environment=SPEAR_RID_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/rid_pcap_sidecar_backend.py
+# Environment=SPEAR_RID_PCAP_DECODER_CMD=/path/to/your-decoder --pcap {PCAP} --write {OUT}
 
 ExecStart=/home/spear/spear-edgev1_0/venv/bin/uvicorn spear_edge.app:app --host 0.0.0.0 --port 8080
 

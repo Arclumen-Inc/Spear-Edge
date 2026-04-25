@@ -45,6 +45,8 @@ const aoaStatusEl       = document.getElementById("aoaStatus");
 const aoaConesListEl    = document.getElementById("aoaConesList");
 const aoaFusionResultEl = document.getElementById("aoaFusionResult");
 let mlClassificationsEl = null; // Will be initialized in init()
+let protocolDetectionsEl = null; // Will be initialized in init()
+let wifiAlertsEl = null; // Will be initialized in init()
 const captureBanner     = document.getElementById("captureBanner");
 const captureProgressBar = document.getElementById("captureProgressBar");
 const wsLed             = document.getElementById("wsLed");
@@ -259,6 +261,8 @@ const cueBuffer = []; // newest first, max 10
 // ML CLASSIFICATIONS BUFFER
 // ------------------------------
 const classificationBuffer = []; // newest first, max 15
+const protocolDetectionBuffer = []; // newest first, max 15
+const wifiAlertBuffer = []; // newest first, max 20
 
 function addCue(ev) {
   // Deduplication: ignore near-identical cues within 5s
@@ -1608,10 +1612,46 @@ function startNotifyWs() {
         }
         // Refresh mode (should return to armed/manual)
         refreshEdgeMode();
+      } else if (msg.type === "rid_update") {
+        const payload = msg.payload || {};
+        const protocolResult = payload.protocol_result || payload;
+        addProtocolDetection({
+          protocol_result: protocolResult,
+          freq_hz: payload.freq_hz || null,
+          source_node: payload.source || "RID_WIFI",
+          ts: payload.ts || Date.now() / 1000,
+        });
+        addWifiAlert({
+          source: "RID_WIFI",
+          label: protocolResult.status || "rid_update",
+          detail: protocolResult.decoded_fields?.uas_id
+            ? `UAS ${protocolResult.decoded_fields.uas_id}`
+            : "RID activity detected",
+          ts: payload.ts,
+        });
+      } else if (msg.type === "wifi_intel_update") {
+        const payload = msg.payload || {};
+        const anomalies = Array.isArray(payload.anomalies) ? payload.anomalies : [];
+        if (anomalies.length > 0) {
+          addWifiAlert({
+            source: payload.source || "WIFI",
+            label: "Anomaly",
+            detail: String(anomalies[0]?.type || anomalies[0]?.detail || "Wi-Fi anomaly"),
+            ts: payload.ts,
+          });
+        } else if ((payload.status || "") === "idle_no_kismet_cmd") {
+          addWifiAlert({
+            source: payload.source || "WIFI",
+            label: "Monitor Idle",
+            detail: "Configure Kismet command on WiFi Radio page.",
+            ts: payload.ts,
+          });
+        }
       }
 
       if (msg.type === "classification_result") {
         console.log("[NOTIFY WS] Received classification_result:", msg.payload);
+        addProtocolDetection(msg.payload);
         addClassification(msg.payload);
       }
 
@@ -3174,6 +3214,104 @@ function addClassification(classification) {
   renderClassifications();
 }
 
+function addProtocolDetection(classificationPayload) {
+  if (!classificationPayload || typeof classificationPayload !== "object") return;
+  const protocolResult = classificationPayload.protocol_result;
+  if (!protocolResult || typeof protocolResult !== "object") return;
+
+  const status = String(protocolResult.status || "no_decode").toLowerCase();
+  if (status === "no_decode") return;
+
+  const entry = {
+    ...protocolResult,
+    freq_hz: classificationPayload.freq_hz,
+    source_node: classificationPayload.source_node,
+    ts: classificationPayload.ts || (Date.now() / 1000),
+  };
+
+  protocolDetectionBuffer.unshift(entry);
+  if (protocolDetectionBuffer.length > 15) {
+    protocolDetectionBuffer.pop();
+  }
+  renderProtocolDetections();
+}
+
+function addWifiAlert(entry) {
+  if (!entry || typeof entry !== "object") return;
+  wifiAlertBuffer.unshift({ ts: Date.now() / 1000, ...entry });
+  if (wifiAlertBuffer.length > 20) {
+    wifiAlertBuffer.pop();
+  }
+  renderWifiAlerts();
+}
+
+function renderWifiAlerts() {
+  if (!wifiAlertsEl) return;
+  if (wifiAlertBuffer.length === 0) {
+    wifiAlertsEl.innerHTML = '<div class="muted">No Wi-Fi alerts yet...</div>';
+    return;
+  }
+  wifiAlertsEl.innerHTML = wifiAlertBuffer.map((item) => {
+    const source = String(item.source || "WIFI").toUpperCase();
+    const label = String(item.label || item.event || item.type || "Update");
+    const detail = String(item.detail || item.summary || "").trim();
+    const when = Number(item.ts || Date.now() / 1000);
+    const secAgo = Math.max(0, Math.round(Date.now() / 1000 - when));
+    return `
+      <div class="wifi-alert-card">
+        <div class="wifi-alert-title">${source} · ${label}</div>
+        <div class="wifi-alert-detail">${detail || "No additional details."}</div>
+        <div class="wifi-alert-meta">${secAgo}s ago</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderProtocolDetections() {
+  if (!protocolDetectionsEl) return;
+  if (protocolDetectionBuffer.length === 0) {
+    protocolDetectionsEl.innerHTML = '<div class="muted">No protocol decodes yet...</div>';
+    return;
+  }
+
+  protocolDetectionsEl.innerHTML = protocolDetectionBuffer.map((item) => {
+    const protocol = String(item.protocol || "protocol").toUpperCase();
+    const status = String(item.status || "no_decode").toLowerCase();
+    const confidence = Math.max(0, Math.min(100, Number(item.confidence || 0) * 100));
+    const cls = status === "decoded_verified" ? "protocol-verified" : "protocol-partial";
+    const freqMHz = item.freq_hz ? `${(Number(item.freq_hz) / 1e6).toFixed(3)} MHz` : "—";
+    const fields = item.decoded_fields || {};
+    const uasId = fields.uas_id || fields.operator_id || "—";
+    const fmtPos = (pos, fallbackLat, fallbackLon, fallbackAlt) => {
+      const lat = Number(pos?.lat ?? fallbackLat);
+      const lon = Number(pos?.lon ?? fallbackLon);
+      const alt = Number(pos?.altitude_m ?? fallbackAlt);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "not available";
+      if (Number.isFinite(alt)) return `${lat.toFixed(6)}, ${lon.toFixed(6)} (${alt.toFixed(1)}m)`;
+      return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+    };
+    const dronePos = fmtPos(fields.drone_position, fields.latitude, fields.longitude, fields.altitude_m);
+    const takeoffPos = fmtPos(fields.takeoff_position, fields.takeoff_lat ?? fields.home_lat, fields.takeoff_lon ?? fields.home_lon, fields.takeoff_altitude_m ?? fields.home_altitude_m);
+    const operatorPos = fmtPos(fields.operator_position, fields.operator_lat, fields.operator_lon, fields.operator_altitude_m);
+    const node = item.source_node || "—";
+
+    return `
+      <div class="protocol-card ${cls}">
+        <div class="protocol-title">${protocol} · ${status.toUpperCase()}</div>
+        <div class="protocol-line">Freq: ${freqMHz} | Confidence: ${confidence.toFixed(0)}%</div>
+        <div class="protocol-line">UAS/Operator ID: ${uasId}</div>
+        <div class="protocol-line">Drone: ${dronePos}</div>
+        <div class="protocol-line">Takeoff: ${takeoffPos}</div>
+        <div class="protocol-line">Operator: ${operatorPos}</div>
+        <div class="protocol-meta">
+          <span>Source: ${node}</span>
+          <span>Frames: ${Number(item.validation?.frame_count || 0)}</span>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
 function renderClassifications() {
   if (!mlClassificationsEl) {
     console.warn("[UI] mlClassificationsEl not found, cannot render classifications");
@@ -3188,10 +3326,15 @@ function renderClassifications() {
   }
 
   mlClassificationsEl.innerHTML = classificationBuffer.map((cls, idx) => {
-    const label = (cls.label || "UNKNOWN").toUpperCase().replace(/_/g, " ");
-    const confidence = (cls.confidence || 0) * 100;
+    const assessment = cls.final_assessment || {};
+    const displayLabel = assessment.label || cls.label || "UNKNOWN";
+    const label = String(displayLabel).toUpperCase().replace(/_/g, " ");
+    const confidence = Number.isFinite(Number(assessment.confidence))
+      ? Number(assessment.confidence) * 100
+      : (cls.confidence || 0) * 100;
     const freqMHz = cls.freq_hz ? (cls.freq_hz / 1e6).toFixed(3) : "—";
     const sourceNode = cls.source_node || "—";
+    const sourceType = (assessment.source || (cls.ml_shadow ? "protocol" : "ml")).toString().toUpperCase();
     
     // Calculate time ago
     const now = Date.now() / 1000;
@@ -3221,7 +3364,7 @@ function renderClassifications() {
           <span class="ml-confidence">${confidence.toFixed(0)}%</span>
         </div>
         <div class="ml-meta">
-          <span>${sourceNode}</span>
+          <span>${sourceNode} · ${sourceType}</span>
           <span>${timeAgoStr}</span>
         </div>
       </div>
@@ -3343,6 +3486,12 @@ function init() {
     } else {
       console.error("[UI] ML classifications element NOT found! Check HTML.");
     }
+  }
+  if (!protocolDetectionsEl) {
+    protocolDetectionsEl = document.getElementById("protocolDetectionsList");
+  }
+  if (!wifiAlertsEl) {
+    wifiAlertsEl = document.getElementById("wifiAlertsList");
   }
   
   resizeCanvas(true);

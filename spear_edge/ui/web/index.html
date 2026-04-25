@@ -22,6 +22,7 @@
       SPEAR-EDGE
     </div>
     <div style="display: flex; align-items: center; gap: 12px;">
+      <a href="/wifi" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">WiFi Radio</a>
       <a href="/ml" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">ML Dashboard</a>
     </div>
 
@@ -403,7 +404,7 @@
     </div>
     <!-- ===================== RIGHT COLUMN ===================== -->
     <div id="rightColumn">
-      
+
       <!-- AoA FUSION PANEL -->
       <div class="panel">
         <div class="panel-header">AoA Fusion</div>
@@ -415,6 +416,26 @@
               <div id="aoaConesList" class="aoa-cones-list"></div>
               <div id="aoaFusionResult" class="aoa-fusion-result"></div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ML CLASSIFICATIONS PANEL -->
+      <div class="panel">
+        <div class="panel-header">Protocol Detections</div>
+        <div class="panel-body">
+          <div id="protocolDetectionsList" class="protocol-detections-list">
+            <div class="muted">No protocol decodes yet...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WIFI/RID ALERTS PANEL -->
+      <div class="panel">
+        <div class="panel-header">Wi-Fi / RID Alerts</div>
+        <div class="panel-body">
+          <div id="wifiAlertsList" class="wifi-alerts-list">
+            <div class="muted">No Wi-Fi alerts yet...</div>
           </div>
         </div>
       </div>

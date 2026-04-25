@@ -36,4 +36,21 @@ class Settings(BaseModel):
     GPSD_PORT: int = int(os.getenv("SPEAR_GPSD_PORT", "2947"))
     GPS_POLL_INTERVAL_S: float = float(os.getenv("SPEAR_GPS_POLL_INTERVAL_S", "1.0"))
 
+    # Wi-Fi monitor service (separate from bladeRF SDR path)
+    WIFI_MONITOR_AUTOSTART: bool = os.getenv("SPEAR_WIFI_MONITOR_AUTOSTART", "false").lower() in ("true", "1", "yes")
+    WIFI_MONITOR_BACKEND: str = os.getenv("SPEAR_WIFI_MONITOR_BACKEND", "kismet").strip().lower()
+    WIFI_MONITOR_IFACE: str = os.getenv("SPEAR_WIFI_MONITOR_IFACE", "wlan1")
+    WIFI_MONITOR_CHANNEL_MODE: str = os.getenv("SPEAR_WIFI_MONITOR_CHANNEL_MODE", "hop").strip().lower()
+    WIFI_MONITOR_POLL_INTERVAL_S: float = float(os.getenv("SPEAR_WIFI_MONITOR_POLL_INTERVAL_S", "2.0"))
+    WIFI_MONITOR_HOP_CHANNELS: str = os.getenv("SPEAR_WIFI_MONITOR_HOP_CHANNELS", "1,6,11,36,44,149")
+    WIFI_MONITOR_KISMET_CMD: str = os.getenv("SPEAR_WIFI_MONITOR_KISMET_CMD", "").strip()
+    WIFI_MONITOR_KISMET_URL: str = os.getenv("SPEAR_WIFI_MONITOR_KISMET_URL", "http://127.0.0.1:2501").strip()
+    WIFI_MONITOR_KISMET_USERNAME: str = os.getenv("SPEAR_WIFI_MONITOR_KISMET_USERNAME", "").strip()
+    WIFI_MONITOR_KISMET_PASSWORD: str = os.getenv("SPEAR_WIFI_MONITOR_KISMET_PASSWORD", "").strip()
+    WIFI_MONITOR_KISMET_TIMEOUT_S: float = float(os.getenv("SPEAR_WIFI_MONITOR_KISMET_TIMEOUT_S", "3.0"))
+
+    # Optional spear_manager integration for remote service control
+    WIFI_MANAGER_URL: str = os.getenv("SPEAR_WIFI_MANAGER_URL", "http://127.0.0.1:8081").strip()
+    WIFI_MANAGER_TOKEN: str = os.getenv("SPEAR_WIFI_MANAGER_TOKEN", "").strip()
+
 settings = Settings()

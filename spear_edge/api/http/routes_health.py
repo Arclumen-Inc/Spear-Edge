@@ -20,12 +20,19 @@ def status():
             sdr_open = bool(getattr(state.sdr, "connected", True))
     except Exception:
         pass
+    wifi_monitor = None
+    try:
+        if getattr(state, "wifi_monitor", None) is not None:
+            wifi_monitor = state.wifi_monitor.get_status()
+    except Exception:
+        wifi_monitor = None
     return {
         "ok": True,
         "mode": mode,
         "sdr_open": sdr_open,
         "scan_running": scan_running,
         "gps": state.gps.get_status() if state.gps else None,
+        "wifi_monitor": wifi_monitor,
     }
 
 @router.get("/sdr")

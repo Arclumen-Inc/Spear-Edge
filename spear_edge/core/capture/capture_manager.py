@@ -19,6 +19,11 @@ from spear_edge.core.capture.spectrogram import (
 )
 from spear_edge.core.sdr.base import GainMode
 from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA, ml_features_metadata
+from spear_edge.core.decode import (
+    RemoteIdDecoder,
+    DjiDroneIdDecoder,
+    fuse_protocol_and_ml,
+)
 
 
 class CaptureManager:
@@ -123,6 +128,10 @@ class CaptureManager:
             from spear_edge.ml.infer_stub import StubRFClassifier
             self.classifier = StubRFClassifier()
             print("[CaptureManager] Using stub classifier (no ML model available)")
+
+        # Protocol decoder scaffolding (Phase 1A)
+        self.remote_id_decoder = RemoteIdDecoder()
+        self.dji_droneid_decoder = DjiDroneIdDecoder()
 
     # --------------------------------------------------
     # Lifecycle
@@ -411,6 +420,31 @@ class CaptureManager:
                 actual_duration_s = actual_samples / req.sample_rate_sps
                 print(f"[CAPTURE] Captured {actual_samples} samples ({actual_duration_s:.2f}s)")
 
+                # Produce protocol decode artifacts (RID first in Phase 1B)
+                try:
+                    self.remote_id_decoder.produce_artifact(
+                        iq_path=iq_path,
+                        center_freq_hz=int(req.freq_hz),
+                        sample_rate_sps=int(req.sample_rate_sps),
+                    )
+                except Exception as e:
+                    print(f"[CAPTURE] Remote ID artifact production failed: {e}")
+                try:
+                    self.dji_droneid_decoder.produce_artifact(
+                        iq_path=iq_path,
+                        center_freq_hz=int(req.freq_hz),
+                        sample_rate_sps=int(req.sample_rate_sps),
+                    )
+                except Exception as e:
+                    print(f"[CAPTURE] DJI artifact production failed: {e}")
+
+                # Protocol-first path (Phase 1A scaffolding)
+                protocol_result = self._run_protocol_decoders(
+                    iq_path=iq_path,
+                    center_freq_hz=int(req.freq_hz),
+                    sample_rate_sps=int(req.sample_rate_sps),
+                )
+
                 # ----------------------------
                 # Features + thumbnails
                 # ----------------------------
@@ -444,7 +478,7 @@ class CaptureManager:
                     sample_rate_sps=int(req.sample_rate_sps),
                 )
                 
-                # Classification (if signal present and not noise)
+                # ML classification (shadow mode when protocol decode is verified)
                 classification = None
                 if triage.get("signal_present") and not triage.get("likely_noise"):
                     if self.classifier is not None:
@@ -463,18 +497,6 @@ class CaptureManager:
                                     pred_conf = pred.get('p', pred.get('confidence', 0.0))
                                     print(f"[CAPTURE]   {i}. {pred_label}: {pred_conf:.2%}")
                             
-                            # Publish classification result to UI (for both manual and armed captures)
-                            event_payload = {
-                                "label": label,
-                                "confidence": float(confidence),
-                                "uncertain": bool(classification.get("uncertain", False)),
-                                "freq_hz": req.freq_hz,
-                                "source_node": req.source_node,
-                                "scan_plan": req.scan_plan,
-                                "ts": time.time(),
-                            }
-                            print(f"[CAPTURE] Publishing classification_result event: {event_payload}")
-                            self.orch.bus.publish_nowait("classification_result", event_payload)
                         except Exception as e:
                             print(f"[CAPTURE] Classification failed: {e}")
                             import traceback
@@ -482,6 +504,26 @@ class CaptureManager:
                             classification = None
                     else:
                         print("[CAPTURE] No classifier available, skipping classification")
+
+                final_assessment = fuse_protocol_and_ml(
+                    protocol_result=protocol_result,
+                    ml_result=classification,
+                )
+                event_payload = {
+                    "label": final_assessment.get("label", "unknown"),
+                    "confidence": float(final_assessment.get("confidence", 0.0)),
+                    "uncertain": bool(classification.get("uncertain", False)) if classification else False,
+                    "freq_hz": req.freq_hz,
+                    "source_node": req.source_node,
+                    "scan_plan": req.scan_plan,
+                    "protocol_result": protocol_result,
+                    "ml_shadow_result": classification,
+                    "final_assessment": final_assessment,
+                    "ml_shadow": bool(final_assessment.get("source") == "protocol"),
+                    "ts": time.time(),
+                }
+                print(f"[CAPTURE] Publishing classification_result event: {event_payload}")
+                self.orch.bus.publish_nowait("classification_result", event_payload)
                 
                 # Save ML tensor (enforced contract: ≤512x512, float32, ~1 MB)
                 np.save(features_dir / "spectrogram.npy", spec_ml)
@@ -528,7 +570,16 @@ class CaptureManager:
                 # Write files (IQ already written, just need metadata and other artifacts)
                 # Note: iq_path is already set above, and IQ is already on disk
                 cap_dir, iq_path, capture_json_path, spec_path_out, stats = self._write_artifacts_from_disk(
-                    req, iq_path, cap_dir, str(thumb_path), spectrogram_axes, actual_duration_s, triage, classification
+                    req,
+                    iq_path,
+                    cap_dir,
+                    str(thumb_path),
+                    spectrogram_axes,
+                    actual_duration_s,
+                    triage,
+                    classification,
+                    protocol_result,
+                    final_assessment,
                 )
                 print(f"[CAPTURE] Files written:")
                 print(f"   Directory: {cap_dir}")
@@ -1207,6 +1258,66 @@ class CaptureManager:
 
         return triage
 
+    def _run_protocol_decoders(
+        self,
+        *,
+        iq_path: Path,
+        center_freq_hz: int,
+        sample_rate_sps: int,
+    ) -> Dict[str, Any]:
+        """
+        Execute protocol decoder candidates and return the best available result.
+        Phase 1A: decoders are scaffolds; selection policy is stable.
+        """
+        candidates: list[Dict[str, Any]] = []
+        for decoder in (self.remote_id_decoder, self.dji_droneid_decoder):
+            try:
+                result = decoder.decode(
+                    iq_path=iq_path,
+                    center_freq_hz=center_freq_hz,
+                    sample_rate_sps=sample_rate_sps,
+                )
+                candidates.append(result)
+            except Exception as e:
+                candidates.append(
+                    {
+                        "protocol": getattr(decoder, "protocol_name", "unknown"),
+                        "status": "decode_error",
+                        "confidence": 0.0,
+                        "validation": {"crc_pass": False, "frame_count": 0},
+                        "decoded_fields": {},
+                        "evidence": {"error": str(e)},
+                    }
+                )
+
+        def _rank(item: Dict[str, Any]) -> tuple[int, float]:
+            status = str(item.get("status", "no_decode")).lower()
+            if status == "decoded_verified":
+                return (3, float(item.get("confidence", 0.0)))
+            if status == "decoded_partial":
+                return (2, float(item.get("confidence", 0.0)))
+            if status == "decode_error":
+                return (1, 0.0)
+            return (0, 0.0)
+
+        best = max(candidates, key=_rank) if candidates else None
+        if best is not None:
+            # Avoid circular references when serializing/logging event payloads:
+            # never embed the same dict object inside itself via candidates list.
+            best_out = {k: v for k, v in best.items() if k != "candidates"}
+            best_out["candidates"] = [{k: v for k, v in c.items() if k != "candidates"} for c in candidates]
+            return best_out
+
+        return {
+            "protocol": None,
+            "status": "no_decode",
+            "confidence": 0.0,
+            "validation": {"crc_pass": False, "frame_count": 0},
+            "decoded_fields": {},
+            "evidence": {"reason": "no_decoder_candidates"},
+            "candidates": [],
+        }
+
     def _write_artifacts(
         self,
         req: CaptureRequest,
@@ -1333,6 +1444,8 @@ class CaptureManager:
         actual_duration_s: float,
         triage: Optional[Dict[str, Any]] = None,
         classification: Optional[Dict[str, Any]] = None,
+        protocol_result: Optional[Dict[str, Any]] = None,
+        final_assessment: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Path, Path, Path, Optional[str], Dict[str, Any]]:
         """
         Write capture artifacts when IQ is already on disk (memory-efficient version).
@@ -1405,7 +1518,7 @@ class CaptureManager:
                 "stats_json_path": str(stats_json_path),
                 "thumbnail_path": spec_path_out,
                 "vita49_path": str(vita49_path) if vita49_path else None,
-            }, spectrogram_axes, actual_duration_s, triage, classification
+            }, spectrogram_axes, actual_duration_s, triage, classification, protocol_result, final_assessment
         )
         
         return cap_dir, iq_path, capture_json_path, spec_path_out, ml_features["stats"]
@@ -1466,6 +1579,8 @@ class CaptureManager:
         actual_duration_s: float,
         triage: Optional[Dict[str, Any]] = None,
         classification: Optional[Dict[str, Any]] = None,
+        protocol_result: Optional[Dict[str, Any]] = None,
+        final_assessment: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Write capture.json when IQ is on disk (memory-efficient)."""
         sdr_info = self.orch.sdr.get_info() if hasattr(self.orch.sdr, "get_info") else {}
@@ -1570,6 +1685,23 @@ class CaptureManager:
         # Add classification if available
         if classification is not None:
             capture_json["classification"] = classification
+
+        capture_json["protocol_result"] = protocol_result or {
+            "protocol": None,
+            "status": "no_decode",
+            "confidence": 0.0,
+            "validation": {"crc_pass": False, "frame_count": 0},
+            "decoded_fields": {},
+            "evidence": {"reason": "decoder_not_run"},
+        }
+        capture_json["ml_shadow_result"] = classification
+        capture_json["final_assessment"] = final_assessment or {
+            "source": "none",
+            "status": "no_decision",
+            "label": "unknown",
+            "confidence": 0.0,
+            "evidence": {"policy": "default"},
+        }
         
         # Add spectrogram axis metadata if available
         if spectrogram_axes:

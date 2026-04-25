@@ -190,6 +190,146 @@ SDR → RX Task → Ring Buffer → Scan Task → Event Bus
 8. Resume scan
 9. Save artifacts
 
+### Wi-Fi Monitor Domain (Kismet-backed)
+
+SPEAR now includes a separate Wi-Fi monitor runtime path independent from bladeRF scan/capture.
+
+Key modules:
+
+- `spear_edge/core/wifi_monitor/models.py`
+- `spear_edge/core/wifi_monitor/manager.py`
+- `spear_edge/core/wifi_monitor/provider_base.py`
+- `spear_edge/core/wifi_monitor/provider_kismet.py`
+- `spear_edge/core/wifi_monitor/provider_generic.py`
+
+Lifecycle:
+
+- Created during app startup in `spear_edge/app.py`
+- Available as `app.state.wifi_monitor` and `state.wifi_monitor`
+- Optional autostart via `SPEAR_WIFI_MONITOR_AUTOSTART`
+- Stopped during app shutdown
+
+Event bus topics:
+
+- `rid_update` (RID detections from Wi-Fi monitor path)
+- `wifi_intel_update` (channel/device/source/anomaly updates)
+
+WebSocket:
+
+- `spear_edge/api/ws/events_ws.py` forwards both topics via `/ws/notify`.
+
+HTTP API:
+
+- Route module: `spear_edge/api/http/routes_wifi_monitor.py`
+- Base: `/api/wifi-monitor`
+
+Control/status endpoints:
+
+- `GET /status`
+- `POST /start`
+- `POST /stop`
+- `POST /config`
+- `POST /test-kismet`
+
+Datasource/channel control endpoints:
+
+- `GET /interfaces`
+- `GET /datasources`
+- `POST /datasource/add`
+- `POST /datasource/open`
+- `POST /datasource/close`
+- `POST /datasource/set-channel`
+- `POST /datasource/set-hop`
+
+Alert endpoints:
+
+- `GET /alerts`
+- `POST /alerts/presence`
+
+Spear Manager proxy endpoints (for Kismet service control from `/wifi`):
+
+- `GET /manager/kismet/status`
+- `POST /manager/kismet/start`
+- `POST /manager/kismet/stop`
+
+These call Spear Manager (`SPEAR_WIFI_MANAGER_URL`) and include bearer auth
+when `SPEAR_WIFI_MANAGER_TOKEN` is set.
+
+Wi-Fi monitor environment variables:
+
+- `SPEAR_WIFI_MONITOR_AUTOSTART` (`true|false`)
+- `SPEAR_WIFI_MONITOR_BACKEND` (`kismet|generic`)
+- `SPEAR_WIFI_MONITOR_IFACE`
+- `SPEAR_WIFI_MONITOR_CHANNEL_MODE` (`hop|fixed`)
+- `SPEAR_WIFI_MONITOR_POLL_INTERVAL_S`
+- `SPEAR_WIFI_MONITOR_HOP_CHANNELS` (comma-separated list)
+- `SPEAR_WIFI_MONITOR_KISMET_URL` (default `http://127.0.0.1:2501`)
+- `SPEAR_WIFI_MONITOR_KISMET_USERNAME`
+- `SPEAR_WIFI_MONITOR_KISMET_PASSWORD`
+- `SPEAR_WIFI_MONITOR_KISMET_TIMEOUT_S`
+- `SPEAR_WIFI_MANAGER_URL` (for Kismet service control proxy)
+- `SPEAR_WIFI_MANAGER_TOKEN`
+
+#### Remote ID decode wiring (Phase 1B)
+
+- Producer entrypoint: `RemoteIdDecoder.produce_artifact(...)`
+- Consumer entrypoint: `RemoteIdDecoder.decode(...)`
+- Standard artifact location: `decode/remote_id.json` under each capture directory
+- CaptureManager runs artifact production before protocol fusion.
+
+Environment variables:
+
+- `SPEAR_RID_DECODER_CMD`:
+  command called by CaptureManager to attempt decode generation.
+  Default service config uses:
+  `/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/rid_decode_wrapper.py`
+- `SPEAR_RID_BACKEND_CMD`:
+  optional backend decoder command consumed by the wrapper.
+  For local integration testing, you can point this at:
+  `/home/spear/spear-edgev1_0/scripts/rid_backend_stub.py`
+- `SPEAR_DJI_DECODER_CMD`:
+  command called by CaptureManager to generate DJI decode artifacts.
+  Default service config uses:
+  `/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/dji_decode_wrapper.py`
+- `SPEAR_DJI_BACKEND_CMD`:
+  optional backend command consumed by DJI wrapper.
+  For local integration testing, you can point this at:
+  `/home/spear/spear-edgev1_0/scripts/dji_backend_stub.py`
+
+Expected backend CLI contract:
+
+- accepts: `--iq-path --center-freq-hz --sample-rate-sps --output-json`
+- writes JSON output matching protocol result schema (or wrapper falls back to `decode_error` / `no_decode`)
+
+RID wrapper normalization behavior:
+
+- Accepts canonical keys directly:
+  - `protocol`, `status`, `confidence`, `validation`, `decoded_fields`, `evidence`
+- Also accepts common minimal backend forms and normalizes:
+  - `fields` or `data` as alternatives to `decoded_fields`
+  - top-level `crc_pass`, `frame_count`
+  - field aliases: `id/serial` -> `uas_id`, `lat/lon` -> `latitude/longitude`
+- Status inference if omitted:
+  - `decoded_verified` when `crc_pass=true` and `frame_count>0`
+  - `decoded_partial` when decoded fields exist without full validation
+  - `no_decode` otherwise
+
+DJI wrapper normalization behavior matches RID wrapper behavior
+(same accepted aliases and status inference rules), but with `protocol=dji_droneid`.
+
+#### Live field backends (optional)
+
+- **DJI DroneID from IQ:** `scripts/dji_samples2droneid_backend.py` shells out to
+  [samples2djidroneid](https://github.com/anarkiwi/samples2djidroneid) (native or Docker).
+  - `SPEAR_DJI_SAMPLES2_CMD` — native decoder argv0 / path (default `samples2djidroneid`).
+  - `SPEAR_DJI_SAMPLES2_DOCKER_IMAGE` — if set, run `docker run ... <image> <iq>` instead of native.
+  - `SPEAR_DJI_SAMPLES2_TIMEOUT_S` — subprocess timeout seconds (default `180`).
+  - Requires capture sample rate **15360000** or **30720000** sps.
+- **ASTM Remote ID from PCAP sidecar:** `scripts/rid_pcap_sidecar_backend.py` looks for
+  `remote_rid.pcap(ng)` or `rid_sidecar.pcap(ng)` beside `iq/samples.iq`, then runs:
+  - `SPEAR_RID_PCAP_DECODER_CMD` — must contain both `{PCAP}` and `{OUT}` placeholders; command
+    is `shlex.split` after substitution; decoder should write JSON to `{OUT}` or print JSON on stdout.
+
 ### ML Classification
 
 **Location:** `ml/`, `core/classify/`

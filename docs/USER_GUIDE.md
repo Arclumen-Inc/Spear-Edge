@@ -213,6 +213,204 @@ curl -X POST http://localhost:8080/api/capture/label \
   }'
 ```
 
+## Protocol Decode (Remote ID)
+
+### Recommended operational path (current)
+
+SPEAR-Edge now supports a **separate Wi-Fi monitor workflow** for RID/Wi-Fi intelligence:
+
+- Main RF workflow remains on `/` (bladeRF FFT/waterfall + capture + ML).
+- Dedicated Wi-Fi operations page is `/wifi` (Kismet-backed monitor controls and intel).
+- Main UI still shows compact Wi-Fi/RID alerts and protocol detections for operator awareness.
+
+This is the preferred path for field RID work because ASTM RID is typically visible as
+Wi-Fi/BLE packet-layer data, not from wideband SDR IQ alone.
+
+### Wi-Fi Radio page (`/wifi`)
+
+The `/wifi` page includes:
+
+- **Wi-Fi Monitor Service** controls: save config, test Kismet connection, start/stop monitor.
+- **Kismet Service controls** (via Spear Manager): status/start/stop.
+- **RID Detections (Wi-Fi)** cards.
+- **Channel Activity**, **Top Emitters**, **Data Sources**, **Device Details**, **Anomalies**.
+- **Alert Controls** for Kismet presence-alert operations.
+
+### Kismet requirements
+
+Kismet is a separate service and must run on the same host (or reachable host):
+
+```bash
+sudo systemctl enable --now kismet.service
+sudo systemctl status kismet.service --no-pager
+curl -I http://127.0.0.1:2501
+```
+
+Expected:
+
+- `kismet.service` is active/running.
+- HTTP endpoint responds on `:2501`.
+
+### Spear Manager integration for Kismet service control
+
+SPEAR `/wifi` can call Spear Manager to start/stop/status `kismet.service`.
+
+Set in `spear-edge.service`:
+
+```ini
+Environment=SPEAR_WIFI_MANAGER_URL=http://127.0.0.1:8081
+Environment=SPEAR_WIFI_MANAGER_TOKEN=
+```
+
+If your Spear Manager uses a token, set the same value in `SPEAR_WIFI_MANAGER_TOKEN`.
+If manager auth is disabled, leave token empty.
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart spear-edge
+```
+
+### Wi-Fi monitor configuration defaults (service env)
+
+Optional environment variables in `spear-edge.service`:
+
+```ini
+Environment=SPEAR_WIFI_MONITOR_BACKEND=kismet
+Environment=SPEAR_WIFI_MONITOR_IFACE=wlan1
+Environment=SPEAR_WIFI_MONITOR_CHANNEL_MODE=hop
+Environment=SPEAR_WIFI_MONITOR_POLL_INTERVAL_S=2.0
+Environment=SPEAR_WIFI_MONITOR_HOP_CHANNELS=1,6,11,36,44,149
+Environment=SPEAR_WIFI_MONITOR_KISMET_URL=http://127.0.0.1:2501
+Environment=SPEAR_WIFI_MONITOR_KISMET_USERNAME=
+Environment=SPEAR_WIFI_MONITOR_KISMET_PASSWORD=
+Environment=SPEAR_WIFI_MONITOR_KISMET_TIMEOUT_S=3.0
+Environment=SPEAR_WIFI_MONITOR_AUTOSTART=false
+```
+
+### What can be validated before monitor-capable adapter arrives
+
+- Kismet service lifecycle and endpoint reachability.
+- `/wifi` API and UI wiring.
+- manager-based Kismet service control from `/wifi`.
+
+### What requires monitor-capable Wi-Fi hardware (ex: AX210)
+
+- Real packet intake in monitor mode.
+- Source/channel hopping performance.
+- Live RID-over-Wi-Fi detection quality.
+
+---
+
+SPEAR-Edge can emit protocol decode artifacts for Remote ID captures:
+
+- Artifact path per capture: `decode/remote_id.json`
+- UI panel: **Protocol Detections** (right column)
+
+By default, the wrapper runs in safe fallback mode (writes `no_decode` if no backend decoder is configured).
+
+To enable a real decoder backend:
+
+1. Edit `scripts/spear-edge.service`
+2. Set:
+   - `SPEAR_RID_DECODER_CMD` (already set to wrapper script)
+   - `SPEAR_RID_BACKEND_CMD` to your decoder command
+3. Reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart spear-edge
+```
+
+Verify in logs:
+
+```bash
+journalctl -u spear-edge -f | rg "CAPTURE|remote_id|decode"
+```
+
+### Quick end-to-end UI validation with stub backend
+
+If you want to validate protocol UI/fusion flow before integrating a real RID decoder:
+
+1. Edit `scripts/spear-edge.service`
+2. Set:
+
+```ini
+Environment=SPEAR_RID_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/rid_backend_stub.py
+```
+
+3. Reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart spear-edge
+```
+
+4. Trigger a manual capture in a RID candidate band (2.4 GHz or 5.8 GHz).
+5. Confirm:
+   - `decode/remote_id.json` exists in capture directory
+   - **Protocol Detections** panel shows `REMOTE_ID · DECODED_VERIFIED`
+   - ML classification still appears as shadow/provenance in the ML panel
+
+### DJI stub validation
+
+You can do the same for DJI protocol flow:
+
+```ini
+Environment=SPEAR_DJI_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/dji_backend_stub.py
+```
+
+After `daemon-reload` and restart, run a capture in 2.4/5.8 GHz and confirm:
+
+- `decode/dji_droneid.json` appears in capture directory
+- **Protocol Detections** shows `DJI_DRONEID · DECODED_VERIFIED`
+
+### Live DJI DroneID from IQ (samples2djidroneid)
+
+SPEAR stores IQ as **interleaved float32 I/Q** (`numpy.complex64`) in `iq/samples.iq`, which matches the **GNU Radio complex float32 (“fc32”)** layout expected by the community decoder:
+
+- Upstream project: [anarkiwi/samples2djidroneid](https://github.com/anarkiwi/samples2djidroneid)
+- Supported capture rates for that decoder: **15.36 Msps** or **30.72 Msps** (other rates will produce a `decode_error` artifact with a clear reason).
+
+**Steps**
+
+1. Build the Docker image or native `samples2djidroneid` binary from the upstream repository.
+2. In your systemd unit (or shell for dev), point the DJI backend at `scripts/dji_samples2droneid_backend.py` and choose **native** or **Docker**:
+   - **Docker** (recommended on Jetson if you do not want a local build):
+     - `Environment=SPEAR_DJI_SAMPLES2_DOCKER_IMAGE=samples2djidroneid` (use the image name you built)
+     - `Environment=SPEAR_DJI_BACKEND_CMD=/home/spear/spear-edgev1_0/venv/bin/python /home/spear/spear-edgev1_0/scripts/dji_samples2droneid_backend.py`
+   - **Native binary**:
+     - `Environment=SPEAR_DJI_SAMPLES2_CMD=/usr/local/bin/samples2djidroneid` (or a basename on `PATH`)
+     - Same `SPEAR_DJI_BACKEND_CMD=...dji_samples2droneid_backend.py` as above.
+3. Optional: `SPEAR_DJI_SAMPLES2_TIMEOUT_S` (default `180`) if decoding is slow on busy spectrum.
+4. `daemon-reload`, restart `spear-edge`, run a manual capture on a DJI/Occusync-relevant frequency with **15.36 or 30.72 Msps**.
+5. Inspect `decode/dji_droneid.json` and the **Protocol Detections** card.
+
+**systemd note:** If any `Environment=` value contains spaces, wrap the entire assignment in double quotes (see [Environment=](https://www.freedesktop.org/software/systemd/man/systemd.exec.html#Environment=)).
+
+### Live ASTM Remote ID (PCAP sidecar path)
+
+ASTM Remote ID is normally received as **Wi‑Fi (beacon / NAN) or Bluetooth LE** frames, not as “automatic decode” from a raw wideband IQ file alone. SPEAR therefore supports an optional **PCAP sidecar** placed next to `samples.iq` in the same `iq/` folder:
+
+| File name (pick one) |
+|----------------------|
+| `remote_rid.pcapng` |
+| `remote_rid.pcap` |
+| `rid_sidecar.pcapng` |
+| `rid_sidecar.pcap` |
+
+Your workflow is:
+
+1. While the drone is transmitting Remote ID, record a monitor-mode PCAP (external tool: `tcpdump`, Wireshark, `droneid-go -pcap`, vendor sniffer, etc.) and save it under one of the names above **inside the capture’s `iq/` directory** (same folder as `samples.iq`).
+2. Set `SPEAR_RID_BACKEND_CMD` to `scripts/rid_pcap_sidecar_backend.py`.
+3. Set `SPEAR_RID_PCAP_DECODER_CMD` to a shell token list (parsed with Python `shlex.split`) that **must include both placeholders** `{PCAP}` and `{OUT}`:
+   - `{PCAP}` expands to the absolute path of the sidecar file.
+   - `{OUT}` expands to the absolute path of `decode/remote_id.json` for this capture (your decoder should write **SPEAR-shaped JSON** there, or print one JSON object on stdout).
+4. Restart the service and run a capture in a RID candidate band so the decoder stage runs.
+
+If no sidecar exists, the artifact will be `no_decode` with reason `rid_pcap_sidecar_not_found`. If `SPEAR_RID_PCAP_DECODER_CMD` is unset, you get `rid_pcap_decoder_cmd_not_configured`.
+
 ## Troubleshooting
 
 ### FFT Not Updating

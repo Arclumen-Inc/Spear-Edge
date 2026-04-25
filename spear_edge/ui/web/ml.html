@@ -67,6 +67,7 @@
       background: #000;
       border-radius: 4px;
       margin-bottom: 8px;
+      cursor: zoom-in;
     }
 
     .capture-info {
@@ -386,6 +387,82 @@
       color: var(--text-main);
       font-size: 11px;
     }
+
+    .image-preview-modal {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.72);
+      z-index: 1200;
+      padding: 24px;
+    }
+
+    .image-preview-modal.open {
+      display: flex;
+    }
+
+    .image-preview-content {
+      width: min(700px, calc(100vw - 48px));
+      max-height: calc(100vh - 48px);
+      background: #0b0f14;
+      border: 1px solid var(--bg-panel-border);
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .image-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--bg-panel-border);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-family: monospace;
+      gap: 12px;
+    }
+
+    .image-preview-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .image-preview-close {
+      background: transparent;
+      border: 1px solid var(--accent-green-dim);
+      color: var(--accent-green);
+      border-radius: 6px;
+      font-size: 12px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    .image-preview-close:hover {
+      background: var(--accent-green-dim);
+    }
+
+    .image-preview-body {
+      padding: 12px;
+      background: #05070b;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 300px;
+    }
+
+    .image-preview-body img {
+      max-width: 100%;
+      max-height: calc(100vh - 180px);
+      object-fit: contain;
+      border-radius: 6px;
+      background: #000;
+    }
   </style>
 </head>
 <body>
@@ -484,6 +561,18 @@
       </div>
     </div>
 
+  </div>
+
+  <div id="imagePreviewModal" class="image-preview-modal" aria-hidden="true">
+    <div class="image-preview-content" role="dialog" aria-modal="true" aria-label="Spectrogram preview">
+      <div class="image-preview-header">
+        <span id="imagePreviewTitle" class="image-preview-title">Spectrogram preview</span>
+        <button id="imagePreviewClose" class="image-preview-close" type="button">Close</button>
+      </div>
+      <div class="image-preview-body">
+        <img id="imagePreviewImg" src="" alt="Expanded spectrogram preview" />
+      </div>
+    </div>
   </div>
 
   <script src="ml.js"></script>

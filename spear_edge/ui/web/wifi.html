@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SPEAR-Edge WiFi Radio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="wifi-page">
+  <header id="top-bar">
+    <div id="title">SPEAR-EDGE WIFI RADIO</div>
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <a href="/" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">Main UI</a>
+      <a href="/ml" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">ML Dashboard</a>
+    </div>
+  </header>
+
+  <div class="wifi-dashboard">
+    <div class="panel">
+      <div class="panel-header">Wi-Fi Monitor Service</div>
+      <div class="panel-body">
+        <div class="btn-row" style="margin-bottom: 8px;">
+          <button id="wifiMgrKismetStatusBtn">Kismet Service Status</button>
+          <button id="wifiMgrKismetStartBtn">Start Kismet Service</button>
+          <button id="wifiMgrKismetStopBtn">Stop Kismet Service</button>
+        </div>
+        <div id="wifiMgrKismetSummary" class="small-note muted" style="margin-bottom: 8px;">Manager control not queried yet...</div>
+        <div class="wifi-controls-grid">
+          <label>
+            Interface
+            <input type="text" id="wifiIfaceInput" placeholder="wlan1">
+          </label>
+          <label>
+            Backend
+            <select id="wifiBackendSelect">
+              <option value="kismet">kismet</option>
+              <option value="generic">generic</option>
+            </select>
+          </label>
+          <label>
+            Channel Mode
+            <select id="wifiChannelModeSelect">
+              <option value="hop">hop</option>
+              <option value="fixed">fixed</option>
+            </select>
+          </label>
+          <label>
+            Poll Interval (s)
+            <input type="number" id="wifiPollInput" min="0.5" step="0.5" value="2">
+          </label>
+          <label class="wifi-wide">
+            Kismet URL
+            <input type="text" id="wifiKismetUrlInput" placeholder="http://127.0.0.1:2501">
+          </label>
+          <label>
+            Kismet Username
+            <input type="text" id="wifiKismetUserInput" placeholder="Optional">
+          </label>
+          <label>
+            Kismet Password
+            <input type="password" id="wifiKismetPassInput" placeholder="Optional">
+          </label>
+          <label>
+            Kismet Timeout (s)
+            <input type="number" id="wifiKismetTimeoutInput" min="1" step="0.5" value="3">
+          </label>
+          <label class="wifi-wide">
+            Kismet Command
+            <input type="text" id="wifiKismetCmdInput" placeholder="Fallback only if Kismet URL is unavailable">
+          </label>
+          <div class="small-note wifi-wide">
+            Preferred mode is direct Kismet HTTP polling. Command mode is a compatibility fallback.
+          </div>
+          <label class="wifi-wide">
+            Hop Channels (comma-separated)
+            <input type="text" id="wifiHopChannelsInput" placeholder="1,6,11,36,44,149">
+          </label>
+        </div>
+        <div class="btn-row" style="margin-top: 10px;">
+          <button id="wifiSaveConfigBtn">Save Config</button>
+          <button id="wifiTestBtn">Test Kismet Connection</button>
+          <button id="wifiStartBtn">Start Monitor</button>
+          <button id="wifiStopBtn">Stop Monitor</button>
+          <button id="wifiRefreshBtn">Refresh</button>
+        </div>
+        <div class="wifi-controls-grid" style="margin-top: 10px;">
+          <label>
+            Export Kind
+            <select id="wifiExportKindSelect">
+              <option value="rid">RID Updates</option>
+              <option value="wifi">Wi-Fi Intel Updates</option>
+            </select>
+          </label>
+          <label>
+            Export Format
+            <select id="wifiExportFormatSelect">
+              <option value="jsonl">JSONL</option>
+              <option value="csv">CSV</option>
+            </select>
+          </label>
+          <label>
+            Export Limit
+            <input type="number" id="wifiExportLimitInput" min="1" max="1000" step="1" value="500">
+          </label>
+          <div class="btn-row">
+            <button id="wifiExportBtn">Download Export</button>
+          </div>
+        </div>
+        <div id="wifiStatusSummary" class="wifi-summary muted" style="margin-top: 8px;">Loading status...</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">RID Detections (Wi-Fi)</div>
+      <div class="panel-body">
+        <div id="wifiRidDetections" class="protocol-detections-list">
+          <div class="muted">No RID detections yet...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Channel Activity</div>
+      <div class="panel-body">
+        <div class="wifi-traffic-strip-wrap">
+          <div class="wifi-traffic-strip-header">
+            <span>Traffic Pulse</span>
+            <span class="muted">Packets vs Data</span>
+          </div>
+          <div id="wifiTrafficStrip" class="wifi-traffic-strip">
+            <div class="muted">Waiting for live traffic...</div>
+          </div>
+        </div>
+        <div id="wifiChannels" class="wifi-list">
+          <div class="muted">No channel data yet...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Top Emitters</div>
+      <div class="panel-body">
+        <div id="wifiEmitters" class="wifi-list">
+          <div class="muted">No emitter data yet...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Data Sources</div>
+      <div class="panel-body">
+        <div class="wifi-controls-grid" style="margin-bottom: 10px;">
+          <label class="wifi-wide">
+            Add Source (Kismet source definition)
+            <input type="text" id="wifiAddSourceInput" placeholder="wlan1:name=ax210,hop=true">
+          </label>
+          <div class="btn-row">
+            <button id="wifiListInterfacesBtn">List Interfaces</button>
+            <button id="wifiAddSourceBtn">Add Source</button>
+            <button id="wifiRefreshSourcesBtn">Refresh Sources</button>
+          </div>
+          <label>
+            Source UUID
+            <input type="text" id="wifiSourceUuidInput" placeholder="source uuid">
+          </label>
+          <label>
+            Fixed Channel
+            <input type="text" id="wifiSourceChannelInput" placeholder="6 or 44">
+          </label>
+          <label>
+            Hop Channels
+            <input type="text" id="wifiSourceHopInput" placeholder="1,6,11,36,44,149">
+          </label>
+          <label>
+            Hop Rate
+            <input type="number" id="wifiSourceHopRateInput" min="0.1" step="0.1" value="5">
+          </label>
+          <div class="btn-row">
+            <button id="wifiSetChannelBtn">Set Channel</button>
+            <button id="wifiSetHopBtn">Set Hop</button>
+            <button id="wifiOpenSourceBtn">Open</button>
+            <button id="wifiCloseSourceBtn">Close</button>
+          </div>
+        </div>
+        <div id="wifiSources" class="wifi-list">
+          <div class="muted">No data sources yet...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Device Details</div>
+      <div class="panel-body">
+        <div id="wifiDevices" class="wifi-list">
+          <div class="muted">No device details yet...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Anomalies</div>
+      <div class="panel-body">
+        <div id="wifiAnomalies" class="wifi-list">
+          <div class="muted">No anomalies yet...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Alert Controls</div>
+      <div class="panel-body">
+        <div class="wifi-controls-grid">
+          <label>
+            Alert Type
+            <select id="wifiAlertTypeSelect">
+              <option value="devicefound">devicefound</option>
+              <option value="devicelost">devicelost</option>
+            </select>
+          </label>
+          <label>
+            Action
+            <select id="wifiAlertActionSelect">
+              <option value="add">add</option>
+              <option value="remove">remove</option>
+            </select>
+          </label>
+          <label class="wifi-wide">
+            MAC Address
+            <input type="text" id="wifiAlertMacInput" placeholder="AA:BB:CC:DD:EE:FF">
+          </label>
+          <div class="btn-row">
+            <button id="wifiApplyAlertBtn">Apply Presence Alert</button>
+            <button id="wifiListAlertsBtn">List Alert Definitions</button>
+          </div>
+        </div>
+        <div id="wifiAlertDefs" class="wifi-list" style="margin-top: 10px;">
+          <div class="muted">No alert definition data yet...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="wifi.js"></script>
+</body>
+</html>

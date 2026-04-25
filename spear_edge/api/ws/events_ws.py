@@ -12,6 +12,8 @@ _TOPICS = (
     "capture_complete",
     "aoa_cone",  # AoA cone updates (v2.0)
     "classification_result",  # ML classification results
+    "rid_update",
+    "wifi_intel_update",
 )
 
 
