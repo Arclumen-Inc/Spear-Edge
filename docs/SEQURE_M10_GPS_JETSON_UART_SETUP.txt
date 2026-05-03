@@ -1,0 +1,182 @@
+================================================================================
+SEQURE M10-series GPS on Jetson Orin (40-pin UART) — configuration snapshot
+================================================================================
+Purpose: Replicate the working UART + gpsd setup from this machine on another
+Jetson Orin Developer Kit.
+
+Note on naming: Vendor listings use model names like M10-122, M10-182,
+M10-252, M10-252Q, etc. There is no "M10-250" in common listings; if your
+module label differs, treat this file as "M10 UART GPS + optional I2C
+compass" setup. Default UART is 115200 8N1, NMEA/UBX-capable receivers.
+
+--------------------------------------------------------------------------------
+1) SOURCE MACHINE SNAPSHOT (captured from the working Jetson)
+--------------------------------------------------------------------------------
+
+Board (device tree model string):
+  NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super
+
+Jetson Linux / BSP (from /etc/nv_tegra_release):
+  # R36 (release), REVISION: 4.7, GCID: 42132812, BOARD: generic, EABI: aarch64,
+  #   DATE: Thu Sep 18 22:54:44 UTC 2025
+  # KERNEL_VARIANT: oot
+
+Kernel (uname):
+  Linux 5.15.148-tegra #1 SMP PREEMPT aarch64
+
+User space:
+  Ubuntu 22.04.5 LTS (jammy)
+
+L4T packages (sample — full list may differ):
+  nvidia-l4t-core and related metapackages at 36.4.7 (JetPack 6.x line)
+
+Primary DTB in use (from /boot — typical Orin Nano Super carrier pairing):
+  /boot/dtb/kernel_tegra234-p3768-0000+p3767-0005-nv-super.dtb
+
+extlinux.conf (primary boot APPEND — no explicit UART overrides on this host):
+  See /boot/extlinux/extlinux.conf on the device (console uses ttyTCU0/tty0).
+
+Kernel UART registration (from journalctl -k on this host — use for comparison
+on the NEW board; the ttyTHS index can differ by carrier, pinmux, or JetPack):
+  3100000.serial: ttyTHS1 at MMIO 0x3100000 (irq = 112, ...) is a TEGRA_UART
+  3140000.serial: ttyTHS2 at MMIO 0x3140000 (irq = 113, ...) is a TEGRA_UART
+
+Serial device nodes (permissions):
+  /dev/ttyTHS1  root:dialout  crw-rw----
+  /dev/ttyTHS2  root:dialout  crw-rw----
+
+Working application choice for GPS serial:
+  /dev/ttyTHS1   (UART wired to 40-pin header on this build)
+
+--------------------------------------------------------------------------------
+2) HARDWARE WIRING (40-pin expansion header)
+--------------------------------------------------------------------------------
+
+Voltage: Jetson header UART is 3.3 V TTL. SEQURE modules are commonly rated
+3.3–5 V supply; use 3.3 V power from the header if you want I/O compatibility,
+or 5 V supply only if the module’s UART pins are explicitly 5 V tolerant (many
+GPS boards are 3.3 V UART — check the datasheet for YOUR PCB).
+
+Connections (classic 3-wire GPS UART):
+  - Jetson GND        → GPS GND   (e.g. pin 6, 9, 14, 20, 25, 30, 34, 39)
+  - Jetson UART TX   → GPS RX    (GPS receives commands from Jetson)
+  - Jetson UART RX   → GPS TX    (Jetson receives NMEA/UBX from GPS)
+
+CRITICAL: On Jetson Orin Nano dev kits, which header pins map to which
+/dev/ttyTHS* node varies by JetPack and pinmux. Do NOT assume ttyTHS0 vs
+ttyTHS1 without testing.
+
+Recommended bring-up on ANY new board:
+  1) Power off. Temporarily jumper Jetson header UART TX → RX (loopback).
+  2) Boot, pick a candidate port (e.g. /dev/ttyTHS1):
+       sudo stty -F /dev/ttyTHS1 115200 raw -echo
+       sudo sh -c 'cat /dev/ttyTHS1 &'
+       echo test | sudo tee /dev/ttyTHS1
+     You should see "test" echoed. If not, try /dev/ttyTHS2 or verify pinmux.
+  3) Remove loopback, connect GPS RX/TX (still crossed vs Jetson TX/RX).
+
+Optional 4-wire / 6-pin harness (compass variants, e.g. *Q models):
+  - Some boards expose I2C (often QMC5883L magnetometer) on separate pins.
+  - If you use compass I2C, you need the correct Jetson I2C bus/pins for your
+    carrier and membership in the "i2c" group or udev rules — verify with:
+      sudo i2cdetect -y <bus>
+    Bus number is NOT portable without checking pinmux docs for that kit.
+
+--------------------------------------------------------------------------------
+3) gpsd configuration (matches this working machine)
+--------------------------------------------------------------------------------
+
+File: /etc/default/gpsd
+
+  DEVICES="/dev/ttyTHS1"
+  GPSD_OPTIONS="-n -s 115200"
+  USBAUTO="false"
+
+Meaning:
+  - gpsd opens only the listed device at boot (when service is enabled).
+  - -n : do not wait for client before polling the receiver.
+  - -s 115200 : set speed to 115200 baud (SEQURE M10 family default in vendor
+    tables; change only if you reconfigured the GPS firmware).
+
+systemd state on this host:
+  gpsd.socket   enabled  (socket activation)
+  gpsd.service  disabled (service itself not enabled; may still start via
+                          socket when clients connect — confirm with:
+                            systemctl status gpsd gpsd.socket)
+
+If you need gpsd running continuously at boot:
+  sudo systemctl enable --now gpsd.service
+  # and ensure DEVICES= points at the UART that actually has the GPS.
+
+--------------------------------------------------------------------------------
+4) User / group permissions
+--------------------------------------------------------------------------------
+
+gpsd needs read/write on the serial device. Typical approach:
+  sudo usermod -aG dialout <username>
+
+On the captured user "spear", groups included: dialout, i2c, gpio, plugdev
+(among others). Minimum for UART GPS + gpsd clients: dialout.
+
+--------------------------------------------------------------------------------
+5) SPEAR-Edge application settings (reads fixes via gpsd, not raw serial)
+--------------------------------------------------------------------------------
+
+Defaults in spear_edge/settings.py (overridable by environment):
+
+  SPEAR_GPSD_HOST=127.0.0.1
+  SPEAR_GPSD_PORT=2947
+  SPEAR_GPS_POLL_INTERVAL_S=1.0
+
+Ensure gpsd is listening (gpsd uses port 2947 by default) and that no firewall
+blocks localhost.
+
+--------------------------------------------------------------------------------
+6) Packages to install on the NEW Jetson (Ubuntu / Jetson image)
+--------------------------------------------------------------------------------
+
+  sudo apt update
+  sudo apt install -y gpsd gpsd-clients
+
+Optional quick tests:
+  sudo systemctl stop gpsd.socket gpsd 2>/dev/null || true
+  sudo gpsd /dev/ttyTHS1 -n -F /var/run/gpsd.sock -s 115200
+  gpsmon
+  # or: cgps -s
+
+--------------------------------------------------------------------------------
+7) Why the "other" Orin Dev Kit might differ (checklist)
+--------------------------------------------------------------------------------
+
+[ ] Wrong /dev/ttyTHS* — always re-run loopback + dmesg/journalctl mapping.
+[ ] Wrong physical pins — carrier J12 pinout differs between module SKUs.
+[ ] TX/RX not crossed — GPS TX must go to Jetson RX and vice versa.
+[ ] Ground missing or noisy — use a solid GND return.
+[ ] 5 V UART into 3.3 V Jetson pins — level shifter required if not 3.3 V safe.
+[ ] Another service owns the UART (serial console, modem, etc.) — disable
+    conflicting getty or console= on that port if assigned.
+[ ] Baud mismatch — module still at 38400/9600 from factory tool; match
+    GPSD_OPTIONS -s or reconfigure GPS to 115200.
+[ ] gpsd USBAUTO vs fixed DEVICES — set USBAUTO=false and explicit DEVICES=.
+[ ] Permissions — user not in dialout; gpsd not allowed to open device.
+[ ] Different JetPack / DTB — UART mux may move; compare MMIO lines in kernel
+    log: 3100000.serial vs other addresses.
+
+--------------------------------------------------------------------------------
+8) Commands to re-capture state on any Jetson (run and save output)
+--------------------------------------------------------------------------------
+
+  cat /etc/nv_tegra_release
+  uname -a
+  cat /proc/device-tree/model 2>/dev/null | tr '\0' '\n'
+  ls -l /dev/ttyTHS*
+  cat /boot/extlinux/extlinux.conf
+  cat /etc/default/gpsd
+  systemctl status gpsd gpsd.socket --no-pager
+  journalctl -k -b --no-pager | grep -iE 'ttyTHS|TEGRA_UART|serial'
+  groups
+
+================================================================================
+End of document — update DEVICES= and physical pin notes after validating the
+new board’s UART node and wiring.
+================================================================================
