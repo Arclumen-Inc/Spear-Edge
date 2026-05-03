@@ -1076,6 +1076,17 @@ input[type="range"]:focus::-moz-range-thumb {
   margin-bottom: 0;
 }
 
+.top-dropdown-inner .net-current-readout {
+  display: block;
+  margin-top: 2px;
+  margin-bottom: 4px;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-main);
+  line-height: 1.35;
+  word-break: break-all;
+}
+
 .top-dropdown-inner input {
   width: 100%;
   padding: 6px 8px;

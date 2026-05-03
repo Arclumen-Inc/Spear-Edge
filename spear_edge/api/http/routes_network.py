@@ -1,10 +1,72 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+import os
 import subprocess
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 router = APIRouter(prefix="/api/network", tags=["network"])
+
+_SYS_NET = "/sys/class/net"
+
+# Virtual / non-edge interfaces to skip when picking primary Ethernet
+_ETHER_SKIP_PREFIXES = (
+    "docker",
+    "br-",
+    "virbr",
+    "veth",
+    "wlan",
+    "wl",
+    "p2p",
+    "can",
+    "tun",
+    "tap",
+    "dummy",
+    "ifb",
+    "l4tbr0",
+)
+_ETHER_SKIP_EXACT = frozenset({"lo", "l4tbr0"})
+
+
+def _list_sys_net_ifaces() -> List[str]:
+    try:
+        return sorted(os.listdir(_SYS_NET))
+    except OSError:
+        return []
+
+
+def _is_ethernet_candidate(name: str) -> bool:
+    if name in _ETHER_SKIP_EXACT:
+        return False
+    if any(name.startswith(p) for p in _ETHER_SKIP_PREFIXES):
+        return False
+    if not (name.startswith("eth") or name.startswith("en")):
+        return False
+    return True
+
+
+def _iface_has_device(name: str) -> bool:
+    return os.path.isdir(os.path.join(_SYS_NET, name, "device"))
+
+
+def detect_ethernet_interfaces() -> List[str]:
+    """Names of likely wired Ethernet interfaces (eth*, en*), excluding common virtual ifaces."""
+    names = [n for n in _list_sys_net_ifaces() if _is_ethernet_candidate(n)]
+    with_dev = [n for n in names if _iface_has_device(n)]
+    pool = with_dev if with_dev else names
+    if "eth0" in pool:
+        return ["eth0"] + [n for n in sorted(pool) if n != "eth0"]
+    return sorted(pool)
+
+
+def detect_primary_ethernet() -> Optional[str]:
+    """Pick primary wired Ethernet (eth0 if present, else first sorted en*/eth*)."""
+    ifaces = detect_ethernet_interfaces()
+    return ifaces[0] if ifaces else None
+
+
+def _interface_exists(name: str) -> bool:
+    return os.path.isdir(os.path.join(_SYS_NET, name))
 
 
 class SetInterfaceRequest(BaseModel):
@@ -12,26 +74,40 @@ class SetInterfaceRequest(BaseModel):
     address: str
 
 
+def _format_ipv4_list(pairs: List[Tuple[str, str]]) -> str:
+    """Join IPv4/CIDR strings; skip loopback; stable order (non-APIPA first)."""
+    out: List[str] = []
+    apipa: List[str] = []
+    for ip, pfx in pairs:
+        if ip.startswith("127."):
+            continue
+        s = f"{ip}/{pfx}" if pfx else ip
+        if ip.startswith("169.254."):
+            apipa.append(s)
+        else:
+            out.append(s)
+    ordered = out + apipa
+    return ", ".join(ordered) if ordered else ""
+
+
 def get_interface_address(interface: str) -> Optional[str]:
-    """Get current IP address for a network interface."""
+    """Get current IPv4 address(es) for a network interface (CIDR if known)."""
+    if not interface:
+        return None
     try:
-        # Use 'ip' command (preferred on modern Linux)
+        # IPv4 only avoids picking the wrong first inet among v4/v6 layout differences
         result = subprocess.run(
-            ["ip", "addr", "show", interface],
+            ["ip", "-4", "addr", "show", "dev", interface],
             capture_output=True,
             text=True,
             timeout=5,
         )
         if result.returncode == 0:
-            # Parse output: inet 192.168.1.100/24
-            match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)(?:/(\d+))?", result.stdout)
-            if match:
-                ip = match.group(1)
-                prefix = match.group(2)
-                if prefix:
-                    return f"{ip}/{prefix}"
-                return ip
-        
+            pairs = re.findall(r"inet\s+(\d+\.\d+\.\d+\.\d+)(?:/(\d+))?", result.stdout)
+            if pairs:
+                joined = _format_ipv4_list(pairs)
+                return joined or None
+
         # Fallback to 'ifconfig' if 'ip' fails
         result = subprocess.run(
             ["ifconfig", interface],
@@ -40,13 +116,13 @@ def get_interface_address(interface: str) -> Optional[str]:
             timeout=5,
         )
         if result.returncode == 0:
-            # Parse output: inet 192.168.1.100 netmask 255.255.255.0
-            match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
-            if match:
-                return match.group(1)
+            pairs = re.findall(r"inet\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
+            if pairs:
+                joined = _format_ipv4_list([(ip, "") for ip in pairs])
+                return joined or None
     except Exception as e:
         print(f"[NETWORK] Error getting address for {interface}: {e}")
-    
+
     return None
 
 
@@ -99,33 +175,49 @@ def set_interface_address(interface: str, address: str) -> bool:
 
 @router.get("/config")
 async def get_network_config():
-    """Get current network configuration for l4tbr0 and eth0."""
+    """Get l4tbr0 and primary wired Ethernet address (iface name is auto-detected, e.g. enP8p1s0)."""
     try:
         l4tbr0 = get_interface_address("l4tbr0")
-        eth0 = get_interface_address("eth0")
-        
+        primary_if = detect_primary_ethernet()
+        primary_addr = get_interface_address(primary_if) if primary_if else None
+
         return {
             "ok": True,
             "l4tbr0": l4tbr0 or "",
-            "eth0": eth0 or "",
+            "primary_ether_if": primary_if or "",
+            "primary_ether": primary_addr or "",
+            # Deprecated: was hardcoded eth0; kept for any stale clients
+            "eth0": primary_addr or "",
         }
     except Exception as e:
         print(f"[NETWORK] Error getting config: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get network config: {str(e)}")
 
 
+def _validate_set_interface(interface: str) -> None:
+    """Raise HTTPException if interface is not allowed (l4tbr0 or existing sysfs iface)."""
+    if interface == "l4tbr0":
+        return
+    if not re.match(r"^[a-zA-Z0-9._-]+$", interface) or len(interface) > 15:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid interface name: {interface}",
+        )
+    if not _interface_exists(interface):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown interface: {interface}",
+        )
+
+
 @router.post("/set")
 async def set_network_interface(request: SetInterfaceRequest):
     """Set IP address for a network interface."""
-    interface = request.interface.strip().lower()
+    # Do not lower-case: Linux names are case-sensitive (e.g. enP8p1s0 on Jetson).
+    interface = request.interface.strip()
     address = request.address.strip()
-    
-    # Validate interface name
-    if interface not in ("l4tbr0", "eth0"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid interface: {interface}. Must be 'l4tbr0' or 'eth0'"
-        )
+
+    _validate_set_interface(interface)
     
     # Basic IP validation
     ip_pattern = r"^(\d{1,3}\.){3}\d{1,3}(/\d{1,2})?$"

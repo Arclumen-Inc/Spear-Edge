@@ -33,10 +33,15 @@ const takCaret          = takHeader ? takHeader.querySelector(".caret") : null;
 const networkHeader     = document.getElementById("networkHeaderTop");
 const networkBody       = document.getElementById("networkBodyTop");
 const networkCaret      = networkHeader ? networkHeader.querySelector(".caret") : null;
-const l4tbr0Input       = document.getElementById("l4tbr0Input");
-const eth0Input         = document.getElementById("eth0Input");
+const l4tbr0Input          = document.getElementById("l4tbr0Input");
+const l4tbr0CurrentReadout = document.getElementById("l4tbr0CurrentReadout");
+const etherAddressInput    = document.getElementById("etherAddressInput");
+const etherCurrentReadout  = document.getElementById("etherCurrentReadout");
+const etherLabelText       = document.getElementById("etherLabelText");
 const btnSetL4tbr0      = document.getElementById("btnSetL4tbr0");
-const btnSetEth0        = document.getElementById("btnSetEth0");
+const btnSetEther       = document.getElementById("btnSetEther");
+// Wired iface name from the last /api/network/config response (e.g. enP8p1s0).
+let primaryEtherIf = "";
 // modePill removed - mode shown via button highlighting
 const armedBanner       = document.getElementById("armedBanner");
 const aoaFusionCanvas   = document.getElementById("aoaFusionCanvas");
@@ -3444,16 +3449,39 @@ function initNetworkCollapse() {
   });
 }
 
+function _setNetReadout(el, addr) {
+  if (!el) return;
+  const s = (addr != null && String(addr).trim() !== "") ? String(addr).trim() : "";
+  el.textContent = s ? `Current: ${s}` : "Current: none";
+}
+
 async function loadNetworkConfig() {
   try {
     const config = await API.getNetworkConfig();
-    if (config) {
-      if (l4tbr0Input && config.l4tbr0) {
-        l4tbr0Input.value = config.l4tbr0;
-      }
-      if (eth0Input && config.eth0) {
-        eth0Input.value = config.eth0;
-      }
+    if (!config) return;
+
+    const l4 = (config.l4tbr0 != null && config.l4tbr0 !== undefined) ? String(config.l4tbr0).trim() : "";
+    if (l4tbr0Input) {
+      l4tbr0Input.value = l4;
+    }
+    _setNetReadout(l4tbr0CurrentReadout, l4);
+
+    primaryEtherIf = (config.primary_ether_if || "").trim();
+    const ether =
+      (config.primary_ether != null && String(config.primary_ether).trim() !== "")
+        ? String(config.primary_ether).trim()
+        : String(config.eth0 || "").trim();
+    if (etherAddressInput) {
+      etherAddressInput.value = ether;
+    }
+    _setNetReadout(etherCurrentReadout, ether);
+
+    if (etherLabelText) {
+      etherLabelText.textContent = primaryEtherIf ? `Ethernet (${primaryEtherIf})` : "Ethernet";
+    }
+    if (btnSetEther) {
+      btnSetEther.textContent = primaryEtherIf ? `Set ${primaryEtherIf}` : "Set Ethernet";
+      btnSetEther.disabled = !primaryEtherIf;
     }
   } catch (e) {
     console.error("[NETWORK] Failed to load config:", e);
@@ -3461,7 +3489,7 @@ async function loadNetworkConfig() {
 }
 
 async function setNetworkInterface(interfaceName) {
-  const input = interfaceName === "l4tbr0" ? l4tbr0Input : eth0Input;
+  const input = interfaceName === "l4tbr0" ? l4tbr0Input : etherAddressInput;
   if (!input) return;
   
   const address = input.value.trim();
@@ -3621,7 +3649,15 @@ function init() {
   if (btnArmed) btnArmed.addEventListener("click", () => apiSetEdgeMode("armed"));
   
   if (btnSetL4tbr0) btnSetL4tbr0.addEventListener("click", () => setNetworkInterface("l4tbr0"));
-  if (btnSetEth0) btnSetEth0.addEventListener("click", () => setNetworkInterface("eth0"));
+  if (btnSetEther) {
+    btnSetEther.addEventListener("click", () => {
+      if (!primaryEtherIf) {
+        alert("No wired Ethernet interface was detected. Set the address from the shell.");
+        return;
+      }
+      void setNetworkInterface(primaryEtherIf);
+    });
+  }
   
   // Gain slider with debouncing for smooth updates
   let gainDebounceTimer = null;
