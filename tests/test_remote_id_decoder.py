@@ -66,4 +66,8 @@ def test_remote_id_produce_artifact_writes_standard_file(tmp_path: Path):
     on_disk = json.loads(artifact.read_text(encoding="utf-8"))
     assert on_disk["protocol"] == "remote_id"
     assert on_disk["status"] == "no_decode"
-    assert produced["evidence"]["reason"] == "rid_decoder_command_not_configured"
+    # No PCAP sidecar: builtin or auto-resolved wrapper returns no_decode.
+    assert produced["evidence"]["reason"] in (
+        "rid_decoder_command_not_configured",
+        "rid_pcap_sidecar_not_found",
+    )

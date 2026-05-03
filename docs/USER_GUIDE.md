@@ -238,7 +238,9 @@ The `/wifi` page includes:
 
 ### Kismet requirements
 
-Kismet is a separate service and must run on the same host (or reachable host):
+Kismet is a **separate package** and is not bundled with SPEAR-Edge. If it is not installed yet, see **`docs/KISMET_INSTALL_JETSON.md`** or run **`sudo bash scripts/install_kismet_jetson.sh`** (Ubuntu LTS codenames only; otherwise use the official packages page).
+
+After installation, Kismet must run on the same host (or a host reachable at `SPEAR_WIFI_MONITOR_KISMET_URL`):
 
 ```bash
 sudo systemctl enable --now kismet.service
@@ -253,7 +255,16 @@ Expected:
 
 ### Spear Manager integration for Kismet service control
 
-SPEAR `/wifi` can call Spear Manager to start/stop/status `kismet.service`.
+SPEAR `/wifi` calls **Spear Manager** (separate service, default port **8081**) for `GET/POST …/kismet/status|start|stop`.
+
+**Install Spear Manager** from the bundle under `/home/spear/spear_manager/` using the SPEAR-Edge script (adds Kismet routes to the manager API):
+
+```bash
+cd /home/spear/spear-edgev1_0   # or your clone path
+bash scripts/install_spear_manager.sh
+```
+
+Full details: **`docs/SPEAR_MANAGER.md`**.
 
 Set in `spear-edge.service`:
 
@@ -278,7 +289,7 @@ Optional environment variables in `spear-edge.service`:
 
 ```ini
 Environment=SPEAR_WIFI_MONITOR_BACKEND=kismet
-Environment=SPEAR_WIFI_MONITOR_IFACE=wlan1
+Environment=SPEAR_WIFI_MONITOR_IFACE=wlP1p1s0
 Environment=SPEAR_WIFI_MONITOR_CHANNEL_MODE=hop
 Environment=SPEAR_WIFI_MONITOR_POLL_INTERVAL_S=2.0
 Environment=SPEAR_WIFI_MONITOR_HOP_CHANNELS=1,6,11,36,44,149

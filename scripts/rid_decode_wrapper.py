@@ -201,7 +201,14 @@ def main() -> int:
     if backend_cmd:
         payload = _run_backend(args, backend_cmd)
     else:
-        payload = _base_payload("backend_not_configured", args)
+        try:
+            from spear_edge.core.decode.rid_wifi_pcap_builtin import decode_rid_iq_path
+
+            payload = decode_rid_iq_path(Path(args.iq_path))
+        except Exception as e:
+            payload = _base_payload("rid_builtin_import_failed", args)
+            payload["status"] = "decode_error"
+            payload["evidence"]["error"] = str(e)
 
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     # Also emit JSON on stdout for compatibility/inspection

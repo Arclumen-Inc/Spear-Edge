@@ -4,16 +4,41 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict
 
 
+def _rid_decode_useful(payload: Dict[str, Any]) -> bool:
+    st = str(payload.get("status", "")).lower()
+    fields = payload.get("decoded_fields") or {}
+    return st in ("decoded_verified", "decoded_partial") and bool(fields)
+
+
+def _default_rid_decoder_cmd() -> str:
+    """Resolve ``scripts/rid_decode_wrapper.py`` for SPEAR_RID_DECODER_CMD default."""
+    candidates: list[Path] = []
+    root = os.environ.get("SPEAR_EDGE_ROOT", "").strip()
+    if root:
+        candidates.append(Path(root) / "scripts" / "rid_decode_wrapper.py")
+    here = Path(__file__).resolve()
+    candidates.append(here.parents[3] / "scripts" / "rid_decode_wrapper.py")
+    candidates.append(Path.cwd() / "scripts" / "rid_decode_wrapper.py")
+    for w in candidates:
+        if w.is_file():
+            return f"{shlex.quote(sys.executable)} {shlex.quote(str(w))}"
+    return ""
+
+
 class RemoteIdDecoder:
     """
-    Phase 1A scaffold decoder.
-    Real demod/parse logic is intentionally deferred; this class provides
-    a stable result contract for capture pipeline integration.
+    ASTM Remote ID decode artifact producer for **Wi‑Fi / PCAP workflows**, not the
+    bladeRF IQ capture path. SPEAR does not run this from ``CaptureManager``; live RID
+    comes from the Wi‑Fi monitor stack (e.g. Kismet → ``rid_update`` on ``/wifi``).
+
+    ``produce_artifact`` is for tooling, tests, or manual sidecars next to an IQ file
+    if you choose that workflow offline.
     """
 
     protocol_name = "remote_id"
@@ -61,8 +86,9 @@ class RemoteIdDecoder:
     ) -> Dict[str, Any]:
         """
         Produce a standardized RID decode artifact.
-        If an external decoder command is configured, invoke it and normalize output.
-        Otherwise write a deterministic no_decode artifact.
+
+        1. Optional built-in ASTM Wi‑Fi beacon decode from a PCAP sidecar beside the IQ.
+        2. ``SPEAR_RID_DECODER_CMD``, or auto-resolved ``scripts/rid_decode_wrapper.py``.
         """
         in_rid_band = (
             2_300_000_000 <= int(center_freq_hz) <= 2_500_000_000
@@ -71,7 +97,6 @@ class RemoteIdDecoder:
         artifact = self._artifact_path(iq_path)
         artifact.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = os.getenv("SPEAR_RID_DECODER_CMD", "").strip()
         if not in_rid_band:
             payload = self._no_decode_payload(
                 reason="center_freq_not_in_rid_band",
@@ -83,6 +108,24 @@ class RemoteIdDecoder:
             self._write_artifact(artifact, payload)
             return payload
 
+        from spear_edge.core.decode.rid_wifi_pcap_builtin import (
+            decode_astm_from_pcap,
+            find_rid_sidecar,
+        )
+
+        sidecar = find_rid_sidecar(iq_path)
+        if sidecar is not None:
+            try:
+                pcap_payload = decode_astm_from_pcap(sidecar)
+                if _rid_decode_useful(pcap_payload):
+                    self._write_artifact(artifact, pcap_payload)
+                    return pcap_payload
+            except Exception as e:
+                print(f"[RID] built-in PCAP decode failed: {e}")
+
+        cmd = os.getenv("SPEAR_RID_DECODER_CMD", "").strip()
+        if not cmd:
+            cmd = _default_rid_decoder_cmd()
         if not cmd:
             payload = self._no_decode_payload(
                 reason="rid_decoder_command_not_configured",

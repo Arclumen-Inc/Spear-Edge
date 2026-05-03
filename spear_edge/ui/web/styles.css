@@ -38,6 +38,52 @@ header {
   font-size: 16px;
 }
 
+.top-bar-mid {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+
+.edge-id-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.edge-id-control label {
+  flex-shrink: 0;
+  letter-spacing: 0.06em;
+}
+
+.edge-id-control input {
+  width: 132px;
+  max-width: 24vw;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  color: var(--accent-green);
+  background: rgba(15, 22, 32, 0.95);
+  border: 1px solid var(--accent-green-dim);
+  border-radius: 6px;
+}
+
+.edge-id-control input:focus {
+  outline: none;
+  border-color: var(--accent-green);
+}
+
+.top-bar-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 #topRightCluster {
   display: flex;
   align-items: center;

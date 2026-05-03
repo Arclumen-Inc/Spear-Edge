@@ -300,12 +300,31 @@ async def get_current_model(request: Request):
     num_classes = None
     if hasattr(classifier, "num_classes"):
         num_classes = classifier.num_classes
-    
+
+    impl = classifier.__class__.__name__
+
+    pytorch_device: Optional[str] = None
+    if hasattr(classifier, "device"):
+        try:
+            pytorch_device = str(classifier.device)
+        except Exception:
+            pytorch_device = None
+
+    onnx_providers: Optional[List[str]] = None
+    if hasattr(classifier, "session") and classifier.session is not None:
+        try:
+            onnx_providers = list(classifier.session.get_providers())
+        except Exception:
+            onnx_providers = None
+
     return {
         "active": True,
         "type": model_type,
+        "implementation": impl,
         "model_path": model_path,
-        "num_classes": num_classes
+        "num_classes": num_classes,
+        "pytorch_device": pytorch_device,
+        "onnx_execution_providers": onnx_providers,
     }
 
 
@@ -1015,8 +1034,8 @@ async def activate_model(request: Request):
 @router.post("/models/reload")
 async def reload_active_model(request: Request):
     """
-    Reload capture manager classifier from spear_edge/ml/models/rf_classifier.pth in-process.
-    Set SPEAR_ML_ALLOW_HOT_RELOAD=0 to disable.
+    Reload capture manager classifier in-process: prefers rf_classifier.pth (PyTorch),
+    otherwise rf_classifier.onnx (ONNX Runtime). Set SPEAR_ML_ALLOW_HOT_RELOAD=0 to disable.
     """
     flag = os.environ.get("SPEAR_ML_ALLOW_HOT_RELOAD", "1").lower()
     if flag in ("0", "false", "no", "off"):
@@ -1024,29 +1043,62 @@ async def reload_active_model(request: Request):
             status_code=403,
             detail="Hot reload disabled (SPEAR_ML_ALLOW_HOT_RELOAD=0).",
         )
-    primary_model = MODELS_DIR / "rf_classifier.pth"
-    if not primary_model.exists():
-        raise HTTPException(status_code=404, detail="rf_classifier.pth not found in models directory")
+    pth = MODELS_DIR / "rf_classifier.pth"
+    onnx_path = MODELS_DIR / "rf_classifier.onnx"
 
     orch = request.app.state.orchestrator
     capture_mgr = orch.capture_mgr
 
-    try:
-        from spear_edge.ml.infer_pytorch import PyTorchRfClassifier
-    except ImportError as e:
-        raise HTTPException(status_code=500, detail=f"PyTorch classifier not available: {e}")
+    primary_model: Path
+    backend: str
 
-    try:
-        clf = PyTorchRfClassifier(str(primary_model))
-        clf.model_path = str(primary_model)
-        capture_mgr.classifier = clf
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
+    if pth.exists():
+        try:
+            from spear_edge.ml.infer_pytorch import PyTorchRfClassifier
+        except ImportError:
+            if not onnx_path.exists():
+                raise HTTPException(
+                    status_code=500,
+                    detail="PyTorch not installed and rf_classifier.onnx not found; install torch or ONNX export.",
+                )
+            try:
+                from spear_edge.ml.infer_onnx import ONNXRfClassifier
+
+                primary_model = onnx_path
+                backend = "onnx"
+                capture_mgr.classifier = ONNXRfClassifier(str(primary_model))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to load ONNX model: {e}")
+        else:
+            try:
+                primary_model = pth
+                backend = "pytorch"
+                clf = PyTorchRfClassifier(str(primary_model))
+                clf.model_path = str(primary_model)
+                capture_mgr.classifier = clf
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to load PyTorch model: {e}")
+    elif onnx_path.exists():
+        try:
+            from spear_edge.ml.infer_onnx import ONNXRfClassifier
+
+            primary_model = onnx_path
+            backend = "onnx"
+            clf = ONNXRfClassifier(str(primary_model))
+            capture_mgr.classifier = clf
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to load ONNX model: {e}")
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail="No rf_classifier.pth or rf_classifier.onnx in models directory",
+        )
 
     out = {
         "ok": True,
-        "message": "Classifier reloaded from rf_classifier.pth",
+        "message": f"Classifier reloaded from {primary_model.name} ({backend})",
         "model_path": str(primary_model),
+        "backend": backend,
         "preprocess_schema": None,
     }
     try:

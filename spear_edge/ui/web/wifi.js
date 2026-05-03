@@ -22,6 +22,12 @@ const wifiMgrKismetStatusBtn = document.getElementById("wifiMgrKismetStatusBtn")
 const wifiMgrKismetStartBtn = document.getElementById("wifiMgrKismetStartBtn");
 const wifiMgrKismetStopBtn = document.getElementById("wifiMgrKismetStopBtn");
 const wifiMgrKismetSummary = document.getElementById("wifiMgrKismetSummary");
+/** Default matches Jetson Orin built-in Wi‑Fi predictable name; override in UI or SPEAR_WIFI_MONITOR_IFACE */
+const DEFAULT_WIFI_IFACE = "wlP1p1s0";
+const wifiPresetShortSourceBtn = document.getElementById("wifiPresetShortSourceBtn");
+const wifiPresetLinuxwifiBtn = document.getElementById("wifiPresetLinuxwifiBtn");
+const wifiQuickPingKismetBtn = document.getElementById("wifiQuickPingKismetBtn");
+const wifiKismetQuickNote = document.getElementById("wifiKismetQuickNote");
 
 const wifiRidDetections = document.getElementById("wifiRidDetections");
 const wifiTrafficStrip = document.getElementById("wifiTrafficStrip");
@@ -220,7 +226,7 @@ function startNotifyWs() {
         );
         renderList(
           wifiEmitters,
-          (p.top_emitters || []).slice(0, 10).map((d) => `${d.bssid || d.mac || "unknown"} · ${d.vendor || "unknown"} · ${d.packets || 0} pkts · ch ${d.channel ?? "?"}`),
+          (p.top_emitters || []).slice(0, 10).map((d) => `${d.mac || d.bssid || "unknown"} · ${d.vendor || "unknown"} · ${d.packets || 0} pkts · ch ${d.channel ?? "?"}`),
           "No emitter data yet..."
         );
         renderList(
@@ -541,10 +547,76 @@ wifiMgrKismetStatusBtn.addEventListener("click", async () => {
 wifiMgrKismetStartBtn.addEventListener("click", () => managerKismetCall("/api/wifi-monitor/manager/kismet/start"));
 wifiMgrKismetStopBtn.addEventListener("click", () => managerKismetCall("/api/wifi-monitor/manager/kismet/stop"));
 
+function ifaceForSourcePreset() {
+  const v = (wifiIfaceInput.value || "").trim();
+  return v || DEFAULT_WIFI_IFACE;
+}
+
+if (wifiPresetShortSourceBtn) {
+  wifiPresetShortSourceBtn.addEventListener("click", () => {
+    wifiAddSourceInput.value = ifaceForSourcePreset();
+    if (wifiKismetQuickNote) {
+      wifiKismetQuickNote.textContent =
+        "Filled “Add Source” with interface name only. If add fails, try the linuxwifi preset.";
+    }
+  });
+}
+
+if (wifiPresetLinuxwifiBtn) {
+  wifiPresetLinuxwifiBtn.addEventListener("click", () => {
+    const iface = ifaceForSourcePreset();
+    wifiAddSourceInput.value = `linuxwifi:interface=${iface}`;
+    if (wifiKismetQuickNote) {
+      wifiKismetQuickNote.textContent = `Filled linuxwifi:interface=${iface} (adjust for your Kismet version if needed).`;
+    }
+  });
+}
+
+if (wifiQuickPingKismetBtn) {
+  wifiQuickPingKismetBtn.addEventListener("click", async () => {
+    if (wifiKismetQuickNote) wifiKismetQuickNote.textContent = "Testing…";
+    try {
+      await apiPost("/api/wifi-monitor/config", {
+        iface: wifiIfaceInput.value.trim(),
+        backend: wifiBackendSelect.value,
+        channel_mode: wifiChannelModeSelect.value,
+        poll_interval_s: Number(wifiPollInput.value || 2),
+        hop_channels: wifiHopChannelsInput.value
+          .split(",")
+          .map((x) => Number(x.trim()))
+          .filter((n) => Number.isFinite(n)),
+        kismet_url: wifiKismetUrlInput.value.trim(),
+        kismet_username: wifiKismetUserInput.value.trim(),
+        kismet_password: wifiKismetPassInput.value,
+        kismet_timeout_s: Number(wifiKismetTimeoutInput.value || 3),
+        kismet_cmd: wifiKismetCmdInput.value.trim(),
+      });
+      const test = await apiPost("/api/wifi-monitor/test-kismet");
+      const r = test.result || {};
+      if (r.ok) {
+        if (wifiKismetQuickNote) {
+          wifiKismetQuickNote.textContent = `Kismet API OK — ${r.status || "ok"} · ch ${r.channels_seen ?? 0} · emitters ${r.emitters_seen ?? 0} · RID-like ${r.rid_candidates ?? 0}`;
+        }
+      } else if (wifiKismetQuickNote) {
+        wifiKismetQuickNote.textContent = `Kismet API failed: ${r.error || r.status || "unknown"} — is kismet running at ${wifiKismetUrlInput.value.trim() || "http://127.0.0.1:2501"}?`;
+      }
+    } catch (e) {
+      if (wifiKismetQuickNote) wifiKismetQuickNote.textContent = `Error: ${e.message}`;
+    }
+  });
+}
+
 async function init() {
   await refreshStatus();
   startNotifyWs();
   setInterval(refreshStatus, 5000);
+  try {
+    const res = await apiGet("/api/wifi-monitor/manager/kismet/status");
+    renderManagerKismetResult(res);
+  } catch (_e) {
+    wifiMgrKismetSummary.textContent =
+      "Spear Manager not reachable (check SPEAR_WIFI_MANAGER_URL). Start Kismet with systemctl if needed — see checklist above.";
+  }
 }
 
 if (document.readyState === "loading") {

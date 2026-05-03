@@ -1,9 +1,8 @@
 [Unit]
 Description=SPEAR Edge UI/API server
-After=network-online.target
+After=network-online.target spear-ingest.service
 Wants=network-online.target spear-ingest.service
-Requires=spear-ingest.service
-After=spear-ingest.service
+# Tripwire HTTP ingest must be up (port 8000) before Edge forwards cues from ingest → /api/tripwire/cue on :8080.
 
 [Service]
 User=spear

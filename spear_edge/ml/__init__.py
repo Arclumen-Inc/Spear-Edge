@@ -1,5 +1,7 @@
 # spear_edge/ml/__init__.py
-from .infer_stub import StubRFClassifier
+from __future__ import annotations
+
+__all__: list[str] = []
 
 # Try to import PyTorch classifier (GPU-accelerated)
 try:
@@ -18,8 +20,6 @@ except ImportError:
     ONNX_AVAILABLE = False
     ONNXRfClassifier = None
 
-# Build __all__ list
-__all__ = ["StubRFClassifier"]
 if PYTORCH_AVAILABLE:
     __all__.extend(["PyTorchRfClassifier", "RFClassifier"])
 if ONNX_AVAILABLE:

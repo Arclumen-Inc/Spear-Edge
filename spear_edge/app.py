@@ -84,6 +84,11 @@ def create_app() -> FastAPI:
     # Use capture_manager from orchestrator to avoid duplicate model loading
     capture_manager = orchestrator.capture_mgr
 
+    # CoT identity: persisted file, then optional SPEAR_EDGE_ID env (env wins)
+    orchestrator.cot.load_persisted_identity()
+    if settings.SPEAR_EDGE_ID:
+        orchestrator.cot.apply_edge_identity(settings.SPEAR_EDGE_ID)
+
     app.state.orchestrator = orchestrator
     app.state.capture_manager = capture_manager
 

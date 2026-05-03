@@ -362,9 +362,9 @@ class BladeRFNativeDevice(SDRBase):
         2. Set sample rate FIRST
         3. Set bandwidth
         4. Set frequency
-        5. Set gain
-        6. Set LNA gain (if configured)
-        7. Configure and activate stream (happens in _setup_stream)
+        5. Optional BT200 / bias-tee per channel
+        6. _setup_stream() — sync config, then enable RX module(s)
+        7. Set manual gain AFTER stream is active (required for correct gain on bladeRF)
         
         Args:
             center_freq_hz: Center frequency in Hz

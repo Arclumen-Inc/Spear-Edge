@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 class WifiMonitorConfig:
     enabled: bool = False
     backend: str = "kismet"
-    iface: str = "wlan1"
+    iface: str = "wlP1p1s0"  # Jetson built-in Wi‑Fi; override via config/env for USB adapters
     channel_mode: str = "hop"
     hop_channels: List[int] = field(default_factory=lambda: [1, 6, 11, 36, 44, 149])
     poll_interval_s: float = 2.0

@@ -46,7 +46,7 @@ async def live_fft_ws(websocket: WebSocket, orchestrator):
             try:
                 while True:
                     evt = q.get_nowait()
-            except Exception:
+            except asyncio.QueueEmpty:
                 pass
 
             # Pull fields

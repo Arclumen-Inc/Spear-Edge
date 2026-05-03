@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import numpy as np
-import torch
+
+if TYPE_CHECKING:
+    import torch
 
 
 def softmax_rows(logits: np.ndarray) -> np.ndarray:
@@ -55,10 +57,12 @@ def fit_temperature(
 
 
 def collect_val_logits(
-    model: torch.nn.Module,
-    val_loader: torch.utils.data.DataLoader,
-    device: torch.device,
+    model: "torch.nn.Module",
+    val_loader: "torch.utils.data.DataLoader",
+    device: "torch.device",
 ) -> Tuple[np.ndarray, np.ndarray]:
+    import torch
+
     model.eval()
     parts_l = []
     parts_y = []

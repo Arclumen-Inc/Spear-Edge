@@ -21,9 +21,15 @@
     <div id="title">
       SPEAR-EDGE
     </div>
-    <div style="display: flex; align-items: center; gap: 12px;">
-      <a href="/wifi" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">WiFi Radio</a>
-      <a href="/ml" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">ML Dashboard</a>
+    <div class="top-bar-mid">
+      <div class="edge-id-control" title="CoT (Cursor on Target) uid and callsign — set unique per SPEAR instance for ATAK">
+        <label for="edgeIdInput">CoT ID</label>
+        <input type="text" id="edgeIdInput" maxlength="64" spellcheck="false" autocomplete="off" placeholder="SPEAR-EDGE" />
+      </div>
+      <div class="top-bar-links">
+        <a href="/wifi" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">WiFi Radio</a>
+        <a href="/ml" style="color: var(--accent-green); text-decoration: none; font-size: 12px; padding: 4px 8px; border: 1px solid var(--accent-green-dim); border-radius: 4px;">ML Dashboard</a>
+      </div>
     </div>
 
     <!-- RIGHT: STATUS + CONTROLS -->

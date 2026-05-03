@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 import socket
 import struct
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
 import netifaces
+
+# Persisted CoT identity (Cursor on Target) for multi-node deployments
+COT_IDENTITY_FILE = Path("data/artifacts/cot_identity.json")
 
 # ---------------------------------------------------------------------
 # Multicast definitions (TAK standard)
@@ -147,6 +153,44 @@ class CoTBroadcaster:
             self.uid = uid
         if callsign:
             self.callsign = callsign
+
+    def apply_edge_identity(self, edge_id: str) -> Dict[str, str]:
+        """
+        Set both CoT uid and contact callsign from one operator string (ATAK uniqueness).
+        Sanitizes to [A-Za-z0-9._-], max 64 chars; empty/invalid → SPEAR-EDGE.
+        """
+        raw = (edge_id or "").strip()
+        clean = re.sub(r"[^A-Za-z0-9._\-]", "_", raw)[:64].strip("_")
+        if not clean:
+            clean = "SPEAR-EDGE"
+        self.uid = clean
+        self.callsign = clean
+        return {"uid": self.uid, "callsign": self.callsign}
+
+    def load_persisted_identity(self) -> bool:
+        """Load edge_id from data/artifacts/cot_identity.json if present."""
+        try:
+            if not COT_IDENTITY_FILE.exists():
+                return False
+            data = json.loads(COT_IDENTITY_FILE.read_text(encoding="utf-8"))
+            eid = str(data.get("edge_id", "")).strip()
+            if not eid:
+                return False
+            self.apply_edge_identity(eid)
+            return True
+        except Exception:
+            return False
+
+    def persist_identity(self) -> None:
+        """Write current uid/callsign to cot_identity.json."""
+        try:
+            COT_IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            COT_IDENTITY_FILE.write_text(
+                json.dumps({"edge_id": self.callsign}, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def update_gps(self, gps: Dict[str, Any]):
         self._gps_cache = dict(gps)
