@@ -7,8 +7,11 @@ Tests core components without requiring full FastAPI environment.
 import sys
 import asyncio
 import time
+from pathlib import Path
 
-sys.path.insert(0, '/home/spear/spear-edgev1_0')
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 async def test_sdr_factory():
     """Test the SDR factory function directly."""

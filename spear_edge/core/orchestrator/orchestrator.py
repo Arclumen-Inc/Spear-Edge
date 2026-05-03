@@ -120,9 +120,8 @@ class Orchestrator:
         self.capture_mgr = CaptureManager(orchestrator=self)
         # Hook up log callback (classification/ATAK handled via event bus subscription)
         self.capture_mgr.on_log = self._log_capture_result
-        # Start the capture worker if it has a start method
-        if hasattr(self.capture_mgr, "start"):
-            asyncio.create_task(self.capture_mgr.start())
+        # Capture worker: started from FastAPI startup (create_app) via
+        # await capture_manager.start() — do not asyncio.create_task here (no event loop yet).
 
         # ----------------------------------------
         # ML classifier + ATAK CoT broadcaster
@@ -134,9 +133,7 @@ class Orchestrator:
             callsign="SPEAR-EDGE",
         )
         self.cot.start()
-        
-        # Subscribe to tripwire_nodes events to update ATAK status when count changes
-        self._setup_tripwire_status_updates()
+        # ATAK tripwire/capture watchers: scheduled from FastAPI startup (running loop).
 
     # -------------------------------------------------
     # SDR lifecycle

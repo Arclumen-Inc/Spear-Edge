@@ -220,6 +220,7 @@ def create_app() -> FastAPI:
     async def _startup():
         if hasattr(capture_manager, "start"):
             await capture_manager.start()
+        orchestrator._setup_tripwire_status_updates()
         # Send online status if already in ARMED mode
         if orchestrator.mode == "armed":
             count = orchestrator._count_connected_tripwires()

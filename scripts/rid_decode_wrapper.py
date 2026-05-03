@@ -194,6 +194,11 @@ def main() -> int:
     parser.add_argument("--output-json", required=True)
     args = parser.parse_args()
 
+    # Subprocess invocations may not inherit PYTHONPATH; ensure repo root is importable.
+    _repo_root = Path(__file__).resolve().parents[1]
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
