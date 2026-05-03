@@ -50,6 +50,10 @@ If unset, `uncertain` is normally `false` (backward compatible).
 
 ONNX outputs **logits**; apply the same preprocessing as PyTorch, then softmax (and optional **T** from calibration if you replicate in your runtime).
 
+### Runtime loading (no PyTorch required)
+
+If `torch` is **not** installed, the capture manager still loads **`spear_edge/ml/models/rf_classifier.onnx`** when present (then legacy `spear_dummy.onnx`). Pair it with **`class_labels.json`** and optional **`rf_classifier.calibration.json`** next to the ONNX file. For GPU ONNX on Jetson, use an NVIDIA/Jetson build of **onnxruntime** with TensorRT or CUDA providers; the stock `pip install onnxruntime` wheel is CPU-only but sufficient for correctness testing.
+
 ## End-to-end flow
 
 1. **Capture** — IQ → `features/spectrogram.npy`; `capture.json` includes `ml_features.preprocess_schema`.

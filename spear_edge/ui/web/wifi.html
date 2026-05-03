@@ -26,10 +26,25 @@
           <button id="wifiMgrKismetStopBtn">Stop Kismet Service</button>
         </div>
         <div id="wifiMgrKismetSummary" class="small-note muted" style="margin-bottom: 8px;">Manager control not queried yet...</div>
+        <div class="wifi-setup-panel small-note" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--accent-green-dim); border-radius: 6px;">
+          <strong>Kismet + monitor mode (checklist)</strong>
+          <ol style="margin: 8px 0 8px 18px; line-height: 1.55; font-size: 12px;">
+            <li><strong>Spear Manager + Kismet</strong> — Install manager from <code>/home/spear/spear_manager/</code> bundle: <code>bash scripts/install_spear_manager.sh</code> (<code>docs/SPEAR_MANAGER.md</code>). Install Kismet package: <code>docs/KISMET_INSTALL_JETSON.md</code>. Prefer <strong>on-demand</strong> Kismet (Manager Start / <code>systemctl start kismet</code>), not boot-enabled.</li>
+            <li><strong>Free the adapter</strong> — Unmanage this interface in NetworkManager / <code>wpa_supplicant</code> before Kismet opens it.</li>
+            <li><strong>Add source</strong> — Use presets → <strong>Add Source</strong> → <strong>Refresh Sources</strong> → paste <strong>UUID</strong> → <strong>Open</strong>.</li>
+            <li><strong>SPEAR</strong> — <strong>Test Kismet Connection</strong>, then <strong>Start Monitor</strong> (HTTP poll only; does not start Kismet).</li>
+          </ol>
+          <div class="btn-row" style="flex-wrap: wrap;">
+            <button type="button" id="wifiPresetShortSourceBtn" title="Interface name only">Preset: iface only</button>
+            <button type="button" id="wifiPresetLinuxwifiBtn" title="linuxwifi datasource">Preset: linuxwifi:interface=…</button>
+            <button type="button" id="wifiQuickPingKismetBtn">Quick: test Kismet API</button>
+          </div>
+          <div id="wifiKismetQuickNote" class="muted" style="margin-top: 6px; font-size: 11px;"></div>
+        </div>
         <div class="wifi-controls-grid">
           <label>
             Interface
-            <input type="text" id="wifiIfaceInput" placeholder="wlan1">
+            <input type="text" id="wifiIfaceInput" placeholder="wlP1p1s0" autocomplete="off">
           </label>
           <label>
             Backend
@@ -153,7 +168,7 @@
         <div class="wifi-controls-grid" style="margin-bottom: 10px;">
           <label class="wifi-wide">
             Add Source (Kismet source definition)
-            <input type="text" id="wifiAddSourceInput" placeholder="wlan1:name=ax210,hop=true">
+            <input type="text" id="wifiAddSourceInput" placeholder="linuxwifi:interface=wlP1p1s0" autocomplete="off">
           </label>
           <div class="btn-row">
             <button id="wifiListInterfacesBtn">List Interfaces</button>

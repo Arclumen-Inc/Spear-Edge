@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class ScanTask:
@@ -192,226 +195,233 @@ class ScanTask:
             else:
                 self._work_iq[:] = iq
 
-            # DC offset removal (configurable via settings)
-            # WARNING: Block-mean subtraction can distort wideband signals, especially if:
-            # - The signal is near DC in the FFT span
-            # - The signal is wideband (20-30 MHz analog video)
-            # - The signal occupies a significant fraction of the displayed band
-            # For wideband signals like FPV VTX, DC removal is disabled by default.
-            # For narrowband signals, DC removal helps reduce LO leakage and DC bias.
-            # If you need DC removal for wideband, tune the LO off-center by 5-10 MHz instead.
-            from spear_edge.settings import settings
-            if settings.DC_REMOVAL:
-                dc_offset = np.mean(self._work_iq)
-                self._work_iq -= dc_offset
+            try:
+                frame_count = self._process_fft_frame(iq, frame_count)
+            except Exception:
+                logger.exception("[SCAN] FFT frame failed; continuing loop")
 
-            # Window and FFT - use pre-allocated arrays
-            # Multiply in-place where possible
-            np.multiply(self._work_iq, self._win, out=self._work_windowed)
-            X = np.fft.fftshift(np.fft.fft(self._work_windowed, n=self.fft_size))
-
-            # Coherent gain normalization (matches SDR++ behavior)
-            # Divides by sum(window) instead of N to account for window energy loss
-            # This ensures a full-scale sine wave peaks at approximately 0 dBFS
-            # Formula: mag = |X| / sum(window), then 20*log10(mag)
-            # 
-            # Hanning window coherent gain ≈ 0.5 (sum ≈ 0.5 * N)
-            # This normalization accounts for window energy loss
-            # Note: Process gain from FFT size will affect absolute noise floor levels
-            mag = np.abs(X) / self._window_sum
-            spec_db = 20.0 * np.log10(mag + self._eps)
-
-            # Average spectrum (EMA) for noise floor estimation only
-            if self._avg_db is None or self._avg_db.shape[0] != spec_db.shape[0]:
-                self._avg_db = spec_db.astype(np.float32)
-            else:
-                self._avg_db = (self._avg_alpha * spec_db + (1.0 - self._avg_alpha) * self._avg_db).astype(np.float32)
-
-            # Robust noise floor estimate from averaged spectrum
-            # EXCLUDE edge bins (first/last 5%) from noise floor calculation
-            # Edge bins are 20+ dB higher due to window sidelobes and don't represent true noise floor
-            exclude_pct = 0.05  # Exclude 5% from each edge
-            exclude_count = int(len(self._avg_db) * exclude_pct)
-            if exclude_count > 0 and exclude_count < len(self._avg_db) // 2:
-                center_spectrum_avg = self._avg_db[exclude_count:-exclude_count]
-            else:
-                # Fallback to full spectrum if exclusion would be too aggressive
-                center_spectrum_avg = self._avg_db
-            
-            # Detect wideband signals using INSTANT spectrum (not averaged)
-            # Averaged spectrum smooths out the signal, making detection less reliable
-            # Use instant spectrum to detect if signal is wideband
-            exclude_count_inst = int(len(spec_db) * exclude_pct)
-            if exclude_count_inst > 0 and exclude_count_inst < len(spec_db) // 2:
-                center_spectrum_inst = spec_db[exclude_count_inst:-exclude_count_inst]
-            else:
-                center_spectrum_inst = spec_db
-            
-            # Detect wideband signals: if >20% of bins are significantly above noise, it's wideband
-            # Use a preliminary noise floor estimate (2nd percentile) to detect signal bins
-            preliminary_floor = float(np.percentile(center_spectrum_inst, 2))
-            signal_threshold = preliminary_floor + 3.0  # Bins 3+ dB above preliminary floor
-            signal_bins = np.sum(center_spectrum_inst > signal_threshold)
-            signal_pct = (signal_bins / len(center_spectrum_inst)) * 100
-            
-            # For wideband signals (>20% of spectrum), use lower percentile to exclude signal energy
-            # For narrowband signals, use 10th percentile (original method)
-            # Use averaged spectrum for final noise floor (more stable), but detection uses instant
-            if signal_pct > 20.0:
-                # Wideband signal detected: use 2nd percentile to get true noise floor
-                # This excludes the signal energy that would contaminate 10th percentile
-                noise_floor_db = float(np.percentile(center_spectrum_avg, 2))
-            else:
-                # Narrowband signal: use 10th percentile (original method works well)
-                noise_floor_db = float(np.percentile(center_spectrum_avg, 10))
-            
-            # SDR++-style FFT smoothing (configurable alpha, default 0.1 for wideband)
-            # Smooth the entire spectrum for display (reduces noise variance)
-            # Lower alpha = more smoothing, higher alpha = less smoothing
-            if self._fft_smoothed is None or self._fft_smoothed.shape[0] != spec_db.shape[0]:
-                self._fft_smoothed = spec_db.astype(np.float32)
-            else:
-                # Thread-safe smoothing update (alpha can change during runtime)
-                alpha = self._fft_smooth_alpha
-                self._fft_smoothed = (alpha * spec_db + (1.0 - alpha) * self._fft_smoothed).astype(np.float32)
-            
-            # Calculate SNR (peak - noise floor)
-            peak_power_db = float(np.max(spec_db))
-            snr_db = peak_power_db - noise_floor_db
-            
-            # SDR++-style SNR smoothing (SNR smoothing=20, alpha=0.05)
-            if self._snr_smoothed is None:
-                self._snr_smoothed = snr_db
-            else:
-                self._snr_smoothed = (self._snr_smooth_alpha * snr_db + (1.0 - self._snr_smooth_alpha) * self._snr_smoothed)
-            
-            # Use smoothed FFT for display (matches SDR++ behavior)
-            # Keep instant spectrum for waterfall (for temporal resolution)
-            power_line = self._fft_smoothed.astype(np.float32)  # Smoothed for FFT display
-            power_inst = spec_db.astype(np.float32)  # Instant for waterfall
-            
-            # ZERO edge bins (first/last 2.5%) for display to remove visual humps
-            # Edge bins are 20+ dB higher due to window sidelobes and don't represent real signal energy
-            edge_zero_pct = 0.025  # Zero 2.5% from each edge (5% total)
-            edge_zero_count = int(len(power_line) * edge_zero_pct)
-            if edge_zero_count > 0:
-                # Zero edge bins in both FFT line and waterfall
-                # Set to noise floor - 10 dB (below display, effectively hidden)
-                edge_zero_value = noise_floor_db - 10.0
-                power_line[:edge_zero_count] = edge_zero_value
-                power_line[-edge_zero_count:] = edge_zero_value
-                power_inst[:edge_zero_count] = edge_zero_value
-                power_inst[-edge_zero_count:] = edge_zero_value
-            
-            # Diagnostic: Check sample levels and peak power
-            # Reduced frequency for production (every 500 frames ~33 seconds at 15 fps)
-            # Can be enabled more frequently with SPEAR_DEBUG_FFT=1 env var
-            import os
-            debug_fft = os.getenv("SPEAR_DEBUG_FFT", "0") == "1"
-            log_interval = 150 if debug_fft else 500
-            if frame_count % log_interval == 0:
-                sample_mag_max = float(np.max(np.abs(iq)))
-                sample_mag_mean = float(np.mean(np.abs(iq)))
-                sample_mag_std = float(np.std(np.abs(iq)))
-                peak_power_db = float(np.max(power_line))
-                peak_power_idx = int(np.argmax(power_line))
-                # Check if there are any bins significantly above noise floor
-                signal_bins = np.sum(power_line > (noise_floor_db + 6.0))  # Bins 6+ dB above noise
-                # Calculate FFT magnitude statistics for debugging
-                mag_max = float(np.max(mag))
-                mag_mean = float(np.mean(mag))
-                # Calculate theoretical noise floor for comparison
-                # For coherent gain normalization: mag = |X| / sum(window)
-                # For white noise: |X| ≈ sqrt(N) per bin, so mag ≈ sqrt(N)/sum(window)
-                # For Hanning window: sum(window) ≈ 0.5*N, so mag ≈ sqrt(N)/(0.5*N) = 2.0/sqrt(N)
-                # dB = 20*log10(2.0/sqrt(N)) = 20*log10(2.0) - 10*log10(N) = 6.02 - 10*log10(N)
-                # For N=1024: theoretical ≈ 6.02 - 30.1 = -24.1 dBFS
-                # For N=4096: theoretical ≈ 6.02 - 36.1 = -30.1 dBFS
-                hanning_coherent_gain = 0.5  # Approximate for Hanning window
-                theoretical_floor = 20.0 * np.log10(1.0 / hanning_coherent_gain) - 10.0 * np.log10(self.fft_size)
-                
-                # EDGE BIN DIAGNOSTICS
-                edge_bin_count = max(10, self.fft_size // 20)  # 5% of bins or 10, whichever is larger
-                edge_bins_start = spec_db[:edge_bin_count]
-                edge_bins_end = spec_db[-edge_bin_count:]
-                center_start_idx = len(spec_db) // 2 - edge_bin_count // 2
-                center_end_idx = len(spec_db) // 2 + edge_bin_count // 2
-                center_bins = spec_db[center_start_idx:center_end_idx]
-                
-                edge_start_mean = float(np.mean(edge_bins_start))
-                edge_start_max = float(np.max(edge_bins_start))
-                edge_end_mean = float(np.mean(edge_bins_end))
-                edge_end_max = float(np.max(edge_bins_end))
-                center_mean = float(np.mean(center_bins))
-                center_max = float(np.max(center_bins))
-                
-                # Noise floor with and without edge bins
-                exclude_pct = 0.05  # Exclude 5% from each edge
-                exclude_count = int(len(spec_db) * exclude_pct)
-                if exclude_count > 0 and exclude_count < len(spec_db) // 2:
-                    center_spectrum = spec_db[exclude_count:-exclude_count]
-                    floor_without_edges = float(np.percentile(center_spectrum, 10))
-                else:
-                    floor_without_edges = noise_floor_db
-                
-                # Frontend equivalent calculation (2nd percentile of raw spectrum)
-                frontend_floor_equiv = float(np.percentile(spec_db, 2))
-                
-                # DC offset diagnostics
-                dc_before = float(np.mean(iq))
-                iq_dc_removed = iq - dc_before
-                dc_after = float(np.mean(iq_dc_removed))
-                
-                # Calculate signal percentage for logging
-                signal_pct_log = (signal_bins / len(power_line)) * 100 if len(power_line) > 0 else 0
-                wideband_detected = signal_pct_log > 20.0
-                print(f"[SCAN] Diagnostics: samples max={sample_mag_max:.6f} mean={sample_mag_mean:.6f} std={sample_mag_std:.6f}, "
-                      f"FFT mag max={mag_max:.6e} mean={mag_mean:.6e}, "
-                      f"peak={peak_power_db:.1f} dBFS@bin{peak_power_idx}, floor={noise_floor_db:.1f} dBFS (theoretical={theoretical_floor:.1f} dBFS), "
-                      f"range={peak_power_db - noise_floor_db:.1f} dB, SNR={self._snr_smoothed:.1f} dB (smoothed), signal_bins={signal_bins} ({signal_pct_log:.1f}%), "
-                      f"wideband={'YES' if wideband_detected else 'NO'}")
-                print(f"[SCAN] Edge Bin Analysis:")
-                print(f"  Edge bins (first {edge_bin_count}): mean={edge_start_mean:.1f} dBFS, max={edge_start_max:.1f} dBFS")
-                print(f"  Edge bins (last {edge_bin_count}): mean={edge_end_mean:.1f} dBFS, max={edge_end_max:.1f} dBFS")
-                print(f"  Center bins ({len(center_bins)}): mean={center_mean:.1f} dBFS, max={center_max:.1f} dBFS")
-                print(f"  Edge elevation: start={edge_start_mean-center_mean:.1f} dB, end={edge_end_mean-center_mean:.1f} dB")
-                # Determine which percentile was actually used
-                percentile_used = "2nd" if wideband_detected else "10th"
-                print(f"[SCAN] Noise Floor Comparison:")
-                print(f"  Backend ({percentile_used} pct, averaged, wideband={wideband_detected}): {noise_floor_db:.1f} dBFS")
-                print(f"  Frontend equiv (2nd pct, raw): {frontend_floor_equiv:.1f} dBFS")
-                print(f"  Without edge bins (10th pct): {floor_without_edges:.1f} dBFS")
-                print(f"  Difference (with vs without edges): {noise_floor_db - floor_without_edges:.1f} dB")
-                print(f"[SCAN] DC Offset: before={dc_before:.6f}, after={dc_after:.6f}, removed={dc_before-dc_after:.6f}")
-
-            # Build truth frame
-            # Do NOT send giant freqs array every frame (client can reconstruct)
-            # FFT line uses smoothed spectrum (SDR++ style), waterfall uses instant
-            frame: Dict[str, Any] = {
-                "ts": time.time(),
-                "center_freq_hz": self.center_freq_hz,
-                "sample_rate_sps": self.sample_rate_sps,
-                "fft_size": self.fft_size,
-                # "freqs_hz": ...  # Removed - client can compute from center_freq, sample_rate, fft_size
-                "power_dbfs": power_line.tolist(),  # Smoothed spectrum for FFT line (SDR++ smoothing=100)
-                "power_inst_dbfs": power_inst.tolist(),  # Instant spectrum for waterfall
-                "noise_floor_dbfs": noise_floor_db,
-                "snr_db": float(self._snr_smoothed),  # Smoothed SNR (SDR++ SNR smoothing=20)
-                # No calibration - using raw bladeRF values
-                "calibration_offset_db": self._calibration_offset_db,
-                "power_units": "dBFS",
-            }
-
-            # Offer to "latest" queue and subscribers (non-blocking)
-            frame_count += 1
-            if frame_count % 30 == 0:  # Log every 30 frames (~3 seconds at 10 fps)
-                # Display in dBm if calibrated (offset != 0), otherwise dBFS
-                unit = "dBm" if abs(self._calibration_offset_db) > 0.1 else "dBFS"
-                print(f"[SCAN] Processed {frame_count} frames, noise_floor={noise_floor_db:.1f} {unit} (offset={self._calibration_offset_db:.1f} dB)")
-            
-            self._offer_latest(frame)
-            self._deliver_to_subs(frame)
-
-            # Maintain target FPS
             elapsed = time.time() - t0
             await asyncio.sleep(max(0.0, period - elapsed))
+
+    def _process_fft_frame(self, iq: np.ndarray, frame_count: int) -> int:
+        """One FFT frame: window, FFT, metrics, subscribers. Returns updated frame_count; raises on failure."""
+        # DC offset removal (configurable via settings)
+        # WARNING: Block-mean subtraction can distort wideband signals, especially if:
+        # - The signal is near DC in the FFT span
+        # - The signal is wideband (20-30 MHz analog video)
+        # - The signal occupies a significant fraction of the displayed band
+        # For wideband signals like FPV VTX, DC removal is disabled by default.
+        # For narrowband signals, DC removal helps reduce LO leakage and DC bias.
+        # If you need DC removal for wideband, tune the LO off-center by 5-10 MHz instead.
+        from spear_edge.settings import settings
+        if settings.DC_REMOVAL:
+            dc_offset = np.mean(self._work_iq)
+            self._work_iq -= dc_offset
+
+        # Window and FFT - use pre-allocated arrays
+        # Multiply in-place where possible
+        np.multiply(self._work_iq, self._win, out=self._work_windowed)
+        X = np.fft.fftshift(np.fft.fft(self._work_windowed, n=self.fft_size))
+
+        # Coherent gain normalization (matches SDR++ behavior)
+        # Divides by sum(window) instead of N to account for window energy loss
+        # This ensures a full-scale sine wave peaks at approximately 0 dBFS
+        # Formula: mag = |X| / sum(window), then 20*log10(mag)
+        # 
+        # Hanning window coherent gain ≈ 0.5 (sum ≈ 0.5 * N)
+        # This normalization accounts for window energy loss
+        # Note: Process gain from FFT size will affect absolute noise floor levels
+        mag = np.abs(X) / self._window_sum
+        spec_db = 20.0 * np.log10(mag + self._eps)
+
+        # Average spectrum (EMA) for noise floor estimation only
+        if self._avg_db is None or self._avg_db.shape[0] != spec_db.shape[0]:
+            self._avg_db = spec_db.astype(np.float32)
+        else:
+            self._avg_db = (self._avg_alpha * spec_db + (1.0 - self._avg_alpha) * self._avg_db).astype(np.float32)
+
+        # Robust noise floor estimate from averaged spectrum
+        # EXCLUDE edge bins (first/last 5%) from noise floor calculation
+        # Edge bins are 20+ dB higher due to window sidelobes and don't represent true noise floor
+        exclude_pct = 0.05  # Exclude 5% from each edge
+        exclude_count = int(len(self._avg_db) * exclude_pct)
+        if exclude_count > 0 and exclude_count < len(self._avg_db) // 2:
+            center_spectrum_avg = self._avg_db[exclude_count:-exclude_count]
+        else:
+            # Fallback to full spectrum if exclusion would be too aggressive
+            center_spectrum_avg = self._avg_db
+        
+        # Detect wideband signals using INSTANT spectrum (not averaged)
+        # Averaged spectrum smooths out the signal, making detection less reliable
+        # Use instant spectrum to detect if signal is wideband
+        exclude_count_inst = int(len(spec_db) * exclude_pct)
+        if exclude_count_inst > 0 and exclude_count_inst < len(spec_db) // 2:
+            center_spectrum_inst = spec_db[exclude_count_inst:-exclude_count_inst]
+        else:
+            center_spectrum_inst = spec_db
+        
+        # Detect wideband signals: if >20% of bins are significantly above noise, it's wideband
+        # Use a preliminary noise floor estimate (2nd percentile) to detect signal bins
+        preliminary_floor = float(np.percentile(center_spectrum_inst, 2))
+        signal_threshold = preliminary_floor + 3.0  # Bins 3+ dB above preliminary floor
+        signal_bins = np.sum(center_spectrum_inst > signal_threshold)
+        signal_pct = (signal_bins / len(center_spectrum_inst)) * 100
+        
+        # For wideband signals (>20% of spectrum), use lower percentile to exclude signal energy
+        # For narrowband signals, use 10th percentile (original method)
+        # Use averaged spectrum for final noise floor (more stable), but detection uses instant
+        if signal_pct > 20.0:
+            # Wideband signal detected: use 2nd percentile to get true noise floor
+            # This excludes the signal energy that would contaminate 10th percentile
+            noise_floor_db = float(np.percentile(center_spectrum_avg, 2))
+        else:
+            # Narrowband signal: use 10th percentile (original method works well)
+            noise_floor_db = float(np.percentile(center_spectrum_avg, 10))
+        
+        # SDR++-style FFT smoothing (configurable alpha, default 0.1 for wideband)
+        # Smooth the entire spectrum for display (reduces noise variance)
+        # Lower alpha = more smoothing, higher alpha = less smoothing
+        if self._fft_smoothed is None or self._fft_smoothed.shape[0] != spec_db.shape[0]:
+            self._fft_smoothed = spec_db.astype(np.float32)
+        else:
+            # Thread-safe smoothing update (alpha can change during runtime)
+            alpha = self._fft_smooth_alpha
+            self._fft_smoothed = (alpha * spec_db + (1.0 - alpha) * self._fft_smoothed).astype(np.float32)
+        
+        # Calculate SNR (peak - noise floor)
+        peak_power_db = float(np.max(spec_db))
+        snr_db = peak_power_db - noise_floor_db
+        
+        # SDR++-style SNR smoothing (SNR smoothing=20, alpha=0.05)
+        if self._snr_smoothed is None:
+            self._snr_smoothed = snr_db
+        else:
+            self._snr_smoothed = (self._snr_smooth_alpha * snr_db + (1.0 - self._snr_smooth_alpha) * self._snr_smoothed)
+        
+        # Use smoothed FFT for display (matches SDR++ behavior)
+        # Keep instant spectrum for waterfall (for temporal resolution)
+        power_line = self._fft_smoothed.astype(np.float32)  # Smoothed for FFT display
+        power_inst = spec_db.astype(np.float32)  # Instant for waterfall
+        
+        # ZERO edge bins (first/last 2.5%) for display to remove visual humps
+        # Edge bins are 20+ dB higher due to window sidelobes and don't represent real signal energy
+        edge_zero_pct = 0.025  # Zero 2.5% from each edge (5% total)
+        edge_zero_count = int(len(power_line) * edge_zero_pct)
+        if edge_zero_count > 0:
+            # Zero edge bins in both FFT line and waterfall
+            # Set to noise floor - 10 dB (below display, effectively hidden)
+            edge_zero_value = noise_floor_db - 10.0
+            power_line[:edge_zero_count] = edge_zero_value
+            power_line[-edge_zero_count:] = edge_zero_value
+            power_inst[:edge_zero_count] = edge_zero_value
+            power_inst[-edge_zero_count:] = edge_zero_value
+        
+        # Diagnostic: Check sample levels and peak power
+        # Reduced frequency for production (every 500 frames ~33 seconds at 15 fps)
+        # Can be enabled more frequently with SPEAR_DEBUG_FFT=1 env var
+        import os
+        debug_fft = os.getenv("SPEAR_DEBUG_FFT", "0") == "1"
+        log_interval = 150 if debug_fft else 500
+        if frame_count % log_interval == 0:
+            sample_mag_max = float(np.max(np.abs(iq)))
+            sample_mag_mean = float(np.mean(np.abs(iq)))
+            sample_mag_std = float(np.std(np.abs(iq)))
+            peak_power_db = float(np.max(power_line))
+            peak_power_idx = int(np.argmax(power_line))
+            # Check if there are any bins significantly above noise floor
+            signal_bins = np.sum(power_line > (noise_floor_db + 6.0))  # Bins 6+ dB above noise
+            # Calculate FFT magnitude statistics for debugging
+            mag_max = float(np.max(mag))
+            mag_mean = float(np.mean(mag))
+            # Calculate theoretical noise floor for comparison
+            # For coherent gain normalization: mag = |X| / sum(window)
+            # For white noise: |X| ≈ sqrt(N) per bin, so mag ≈ sqrt(N)/sum(window)
+            # For Hanning window: sum(window) ≈ 0.5*N, so mag ≈ sqrt(N)/(0.5*N) = 2.0/sqrt(N)
+            # dB = 20*log10(2.0/sqrt(N)) = 20*log10(2.0) - 10*log10(N) = 6.02 - 10*log10(N)
+            # For N=1024: theoretical ≈ 6.02 - 30.1 = -24.1 dBFS
+            # For N=4096: theoretical ≈ 6.02 - 36.1 = -30.1 dBFS
+            hanning_coherent_gain = 0.5  # Approximate for Hanning window
+            theoretical_floor = 20.0 * np.log10(1.0 / hanning_coherent_gain) - 10.0 * np.log10(self.fft_size)
+            
+            # EDGE BIN DIAGNOSTICS
+            edge_bin_count = max(10, self.fft_size // 20)  # 5% of bins or 10, whichever is larger
+            edge_bins_start = spec_db[:edge_bin_count]
+            edge_bins_end = spec_db[-edge_bin_count:]
+            center_start_idx = len(spec_db) // 2 - edge_bin_count // 2
+            center_end_idx = len(spec_db) // 2 + edge_bin_count // 2
+            center_bins = spec_db[center_start_idx:center_end_idx]
+            
+            edge_start_mean = float(np.mean(edge_bins_start))
+            edge_start_max = float(np.max(edge_bins_start))
+            edge_end_mean = float(np.mean(edge_bins_end))
+            edge_end_max = float(np.max(edge_bins_end))
+            center_mean = float(np.mean(center_bins))
+            center_max = float(np.max(center_bins))
+            
+            # Noise floor with and without edge bins
+            exclude_pct = 0.05  # Exclude 5% from each edge
+            exclude_count = int(len(spec_db) * exclude_pct)
+            if exclude_count > 0 and exclude_count < len(spec_db) // 2:
+                center_spectrum = spec_db[exclude_count:-exclude_count]
+                floor_without_edges = float(np.percentile(center_spectrum, 10))
+            else:
+                floor_without_edges = noise_floor_db
+            
+            # Frontend equivalent calculation (2nd percentile of raw spectrum)
+            frontend_floor_equiv = float(np.percentile(spec_db, 2))
+            
+            # DC offset diagnostics
+            dc_before = float(np.mean(iq))
+            iq_dc_removed = iq - dc_before
+            dc_after = float(np.mean(iq_dc_removed))
+            
+            # Calculate signal percentage for logging
+            signal_pct_log = (signal_bins / len(power_line)) * 100 if len(power_line) > 0 else 0
+            wideband_detected = signal_pct_log > 20.0
+            print(f"[SCAN] Diagnostics: samples max={sample_mag_max:.6f} mean={sample_mag_mean:.6f} std={sample_mag_std:.6f}, "
+                  f"FFT mag max={mag_max:.6e} mean={mag_mean:.6e}, "
+                  f"peak={peak_power_db:.1f} dBFS@bin{peak_power_idx}, floor={noise_floor_db:.1f} dBFS (theoretical={theoretical_floor:.1f} dBFS), "
+                  f"range={peak_power_db - noise_floor_db:.1f} dB, SNR={self._snr_smoothed:.1f} dB (smoothed), signal_bins={signal_bins} ({signal_pct_log:.1f}%), "
+                  f"wideband={'YES' if wideband_detected else 'NO'}")
+            print(f"[SCAN] Edge Bin Analysis:")
+            print(f"  Edge bins (first {edge_bin_count}): mean={edge_start_mean:.1f} dBFS, max={edge_start_max:.1f} dBFS")
+            print(f"  Edge bins (last {edge_bin_count}): mean={edge_end_mean:.1f} dBFS, max={edge_end_max:.1f} dBFS")
+            print(f"  Center bins ({len(center_bins)}): mean={center_mean:.1f} dBFS, max={center_max:.1f} dBFS")
+            print(f"  Edge elevation: start={edge_start_mean-center_mean:.1f} dB, end={edge_end_mean-center_mean:.1f} dB")
+            # Determine which percentile was actually used
+            percentile_used = "2nd" if wideband_detected else "10th"
+            print(f"[SCAN] Noise Floor Comparison:")
+            print(f"  Backend ({percentile_used} pct, averaged, wideband={wideband_detected}): {noise_floor_db:.1f} dBFS")
+            print(f"  Frontend equiv (2nd pct, raw): {frontend_floor_equiv:.1f} dBFS")
+            print(f"  Without edge bins (10th pct): {floor_without_edges:.1f} dBFS")
+            print(f"  Difference (with vs without edges): {noise_floor_db - floor_without_edges:.1f} dB")
+            print(f"[SCAN] DC Offset: before={dc_before:.6f}, after={dc_after:.6f}, removed={dc_before-dc_after:.6f}")
+
+        # Build truth frame
+        # Do NOT send giant freqs array every frame (client can reconstruct)
+        # FFT line uses smoothed spectrum (SDR++ style), waterfall uses instant
+        frame: Dict[str, Any] = {
+            "ts": time.time(),
+            "center_freq_hz": self.center_freq_hz,
+            "sample_rate_sps": self.sample_rate_sps,
+            "fft_size": self.fft_size,
+            # "freqs_hz": ...  # Removed - client can compute from center_freq, sample_rate, fft_size
+            "power_dbfs": power_line.tolist(),  # Smoothed spectrum for FFT line (SDR++ smoothing=100)
+            "power_inst_dbfs": power_inst.tolist(),  # Instant spectrum for waterfall
+            "noise_floor_dbfs": noise_floor_db,
+            "snr_db": float(self._snr_smoothed),  # Smoothed SNR (SDR++ SNR smoothing=20)
+            # No calibration - using raw bladeRF values
+            "calibration_offset_db": self._calibration_offset_db,
+            "power_units": "dBFS",
+        }
+
+        # Offer to "latest" queue and subscribers (non-blocking)
+        frame_count += 1
+        if frame_count % 30 == 0:  # Log every 30 frames (~3 seconds at 10 fps)
+            # Display in dBm if calibrated (offset != 0), otherwise dBFS
+            unit = "dBm" if abs(self._calibration_offset_db) > 0.1 else "dBFS"
+            print(f"[SCAN] Processed {frame_count} frames, noise_floor={noise_floor_db:.1f} {unit} (offset={self._calibration_offset_db:.1f} dB)")
+        
+        self._offer_latest(frame)
+        self._deliver_to_subs(frame)
+        return frame_count

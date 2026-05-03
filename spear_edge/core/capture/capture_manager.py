@@ -19,11 +19,7 @@ from spear_edge.core.capture.spectrogram import (
 )
 from spear_edge.core.sdr.base import GainMode
 from spear_edge.ml.preprocess import CURRENT_PREPROCESS_SCHEMA, ml_features_metadata
-from spear_edge.core.decode import (
-    RemoteIdDecoder,
-    DjiDroneIdDecoder,
-    fuse_protocol_and_ml,
-)
+from spear_edge.core.decode import DjiDroneIdDecoder, fuse_protocol_and_ml
 
 
 class CaptureManager:
@@ -43,10 +39,9 @@ class CaptureManager:
     ):
         self.orch = orchestrator
 
-        # FORCE ABSOLUTE PATH — CHANGE IF NEEDED
-        self.out_dir = Path("/home/spear/spear-edgev1_0/data/artifacts/captures")
+        self.out_dir = Path(out_dir).expanduser().resolve()
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[CAPTURE MGR] Initialized — writing to: {self.out_dir.resolve()}")
+        print(f"[CAPTURE MGR] Initialized — writing to: {self.out_dir}")
 
         self._q: asyncio.Queue[CaptureRequest] = asyncio.Queue(maxsize=max_queue)
         self._worker: Optional[asyncio.Task] = None
@@ -99,19 +94,27 @@ class CaptureManager:
             import traceback
             traceback.print_exc()
         
-        # Fallback to ONNX classifier
+        # Fallback to ONNX classifier (primary export name first, then legacy dummy)
         if self.classifier is None:
             try:
                 from spear_edge.ml.infer_onnx import ONNXRfClassifier
-                model_path = Path("spear_edge/ml/models/spear_dummy.onnx")
-                if model_path.exists():
+
+                _models = Path("spear_edge/ml/models")
+                _onnx_candidates = [
+                    _models / "rf_classifier.onnx",
+                    _models / "spear_dummy.onnx",
+                ]
+                model_path = next((p for p in _onnx_candidates if p.exists()), None)
+                if model_path is not None:
                     self.classifier = ONNXRfClassifier(str(model_path))
-                    print("[CaptureManager] Loaded ONNX classifier")
-                    # Ensure model_path is stored
+                    print(f"[CaptureManager] Loaded ONNX classifier from {model_path}")
                     if not hasattr(self.classifier, "model_path") or not self.classifier.model_path:
                         self.classifier.model_path = str(model_path)
                 else:
-                    print(f"[CaptureManager] ONNX model not found: {model_path}")
+                    print(
+                        "[CaptureManager] ONNX: no model found "
+                        f"(tried {[str(p) for p in _onnx_candidates]})"
+                    )
             except ImportError as e:
                 print(f"[CaptureManager] ONNX Runtime not available: {e}")
             except Exception as e:
@@ -123,14 +126,15 @@ class CaptureManager:
                 self.classifier = orchestrator.classifier
                 print("[CaptureManager] Using orchestrator-provided classifier")
         
-        # Final fallback to stub
         if self.classifier is None:
-            from spear_edge.ml.infer_stub import StubRFClassifier
-            self.classifier = StubRFClassifier()
-            print("[CaptureManager] Using stub classifier (no ML model available)")
+            print(
+                "[CaptureManager] ML: no classifier loaded "
+                "(install PyTorch/ONNX model under spear_edge/ml/models/ or provide orchestrator.classifier with .classify())"
+            )
 
         # Protocol decoder scaffolding (Phase 1A)
-        self.remote_id_decoder = RemoteIdDecoder()
+        # ASTM Remote ID is not produced from the SDR IQ path; use Wi‑Fi monitor
+        # (Kismet / `/wifi`) or offline PCAP tooling. See RemoteIdDecoder for optional artifacts.
         self.dji_droneid_decoder = DjiDroneIdDecoder()
 
     # --------------------------------------------------
@@ -420,15 +424,6 @@ class CaptureManager:
                 actual_duration_s = actual_samples / req.sample_rate_sps
                 print(f"[CAPTURE] Captured {actual_samples} samples ({actual_duration_s:.2f}s)")
 
-                # Produce protocol decode artifacts (RID first in Phase 1B)
-                try:
-                    self.remote_id_decoder.produce_artifact(
-                        iq_path=iq_path,
-                        center_freq_hz=int(req.freq_hz),
-                        sample_rate_sps=int(req.sample_rate_sps),
-                    )
-                except Exception as e:
-                    print(f"[CAPTURE] Remote ID artifact production failed: {e}")
                 try:
                     self.dji_droneid_decoder.produce_artifact(
                         iq_path=iq_path,
@@ -1270,7 +1265,7 @@ class CaptureManager:
         Phase 1A: decoders are scaffolds; selection policy is stable.
         """
         candidates: list[Dict[str, Any]] = []
-        for decoder in (self.remote_id_decoder, self.dji_droneid_decoder):
+        for decoder in (self.dji_droneid_decoder,):
             try:
                 result = decoder.decode(
                     iq_path=iq_path,

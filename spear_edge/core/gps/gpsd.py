@@ -1,8 +1,10 @@
 # spear_edge/core/gps/gpsd.py
 from __future__ import annotations
 
+import re
 import time
 import threading
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Callable
 
 try:
@@ -42,6 +44,31 @@ class GpsdClient:
             return
 
         self._connect()
+
+    @staticmethod
+    def _format_gps_time_utc(raw: Any) -> Optional[str]:
+        """Format gpsd TPV `time` (ISO-8601) as compact UTC for the UI."""
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("ascii", errors="ignore").strip()
+        else:
+            raw = str(raw).strip()
+        if not raw or raw == "nan":
+            return None
+        try:
+            s = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+        except Exception:
+            m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})", raw)
+            if m:
+                return f"{m.group(1)} {m.group(2)} UTC"
+            return raw[:32] + (" UTC" if "UTC" not in raw.upper() else "")
 
     def _connect(self):
         try:
@@ -131,6 +158,11 @@ class GpsdClient:
             elif mode >= 3:
                 fix = "3D"
 
+            tpv_time = getattr(report, "time", None)
+            gps_time_str = self._format_gps_time_utc(tpv_time)
+            if not gps_time_str:
+                gps_time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
             self.last_fix = {
                 "gps_fix": fix,
                 "gps_lat": float(lat),
@@ -139,7 +171,7 @@ class GpsdClient:
                 "heading_deg": float(heading) if heading is not None else None,
                 "speed_mps": float(speed) if speed is not None else None,
                 "gps_source": f"{self.host}:{self.port}",
-                "gps_time": time.strftime("%H:%M:%SZ", time.gmtime()),
+                "gps_time": gps_time_str,
             }
             self.last_update = time.time()
             if self.on_fix:

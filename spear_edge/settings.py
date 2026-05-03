@@ -31,6 +31,9 @@ class Settings(BaseModel):
     # Set via env var: SPEAR_DC_REMOVAL=true
     DC_REMOVAL: bool = os.getenv("SPEAR_DC_REMOVAL", "false").lower() in ("true", "1", "yes")
 
+    # CoT (Cursor on Target) identity — unique per SPEAR instance (uid + callsign). Env overrides file on startup.
+    SPEAR_EDGE_ID: str = os.getenv("SPEAR_EDGE_ID", "").strip()
+
     # GPSD configuration (works with USB GPS or GPIO/UART-backed gpsd sources)
     GPSD_HOST: str = os.getenv("SPEAR_GPSD_HOST", "127.0.0.1")
     GPSD_PORT: int = int(os.getenv("SPEAR_GPSD_PORT", "2947"))
@@ -39,7 +42,8 @@ class Settings(BaseModel):
     # Wi-Fi monitor service (separate from bladeRF SDR path)
     WIFI_MONITOR_AUTOSTART: bool = os.getenv("SPEAR_WIFI_MONITOR_AUTOSTART", "false").lower() in ("true", "1", "yes")
     WIFI_MONITOR_BACKEND: str = os.getenv("SPEAR_WIFI_MONITOR_BACKEND", "kismet").strip().lower()
-    WIFI_MONITOR_IFACE: str = os.getenv("SPEAR_WIFI_MONITOR_IFACE", "wlan1")
+    # Jetson Orin Nano predictable naming (override with SPEAR_WIFI_MONITOR_IFACE)
+    WIFI_MONITOR_IFACE: str = os.getenv("SPEAR_WIFI_MONITOR_IFACE", "wlP1p1s0")
     WIFI_MONITOR_CHANNEL_MODE: str = os.getenv("SPEAR_WIFI_MONITOR_CHANNEL_MODE", "hop").strip().lower()
     WIFI_MONITOR_POLL_INTERVAL_S: float = float(os.getenv("SPEAR_WIFI_MONITOR_POLL_INTERVAL_S", "2.0"))
     WIFI_MONITOR_HOP_CHANNELS: str = os.getenv("SPEAR_WIFI_MONITOR_HOP_CHANNELS", "1,6,11,36,44,149")

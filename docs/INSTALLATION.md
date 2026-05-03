@@ -93,9 +93,12 @@ Should show: `Nuand bladeRF 2.0 micro`
 If using GPS for ATAK integration:
 
 ```bash
+sudo apt install -y gpsd gpsd-clients python3-gps
 sudo systemctl start gpsd
 gpsmon
 ```
+
+The web UI top-bar GPS LED reads **`/health/status`** from SPEAR’s **Python `gps` module** (`python3-gps`, same family as `cgps`). The project `venv` must be able to import that module: either create the venv with `python3 -m venv --system-site-packages venv`, or set `include-system-site-packages = true` in `venv/pyvenv.cfg` after installing `python3-gps`. Otherwise the LED stays off even when `cgps` shows a 3D fix.
 
 ### 7. Create Data Directories
 

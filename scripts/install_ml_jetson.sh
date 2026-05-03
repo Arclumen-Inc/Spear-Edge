@@ -80,23 +80,28 @@ else
     pip3 install numpy>=1.23,<2.0
 fi
 
-# Test model loading (if dummy model exists)
+# Test model loading (production ONNX or legacy dummy)
 echo ""
-if [ -f "spear_edge/ml/models/spear_dummy.onnx" ]; then
-    echo "Testing model loading with dummy model..."
-    python3 << 'EOF'
+ONNX_TEST=""
+if [ -f "spear_edge/ml/models/rf_classifier.onnx" ]; then
+    ONNX_TEST="spear_edge/ml/models/rf_classifier.onnx"
+elif [ -f "spear_edge/ml/models/spear_dummy.onnx" ]; then
+    ONNX_TEST="spear_edge/ml/models/spear_dummy.onnx"
+fi
+if [ -n "$ONNX_TEST" ]; then
+    echo "Testing ONNX load: $ONNX_TEST"
+    python3 << EOF
 import onnxruntime as ort
-import numpy as np
 try:
-    sess = ort.InferenceSession('spear_edge/ml/models/spear_dummy.onnx')
-    print("✅ Model loading successful")
+    sess = ort.InferenceSession("$ONNX_TEST")
+    print("✅ ONNX model loading successful")
     print(f"   Input: {sess.get_inputs()[0].name} {sess.get_inputs()[0].shape}")
     print(f"   Output: {sess.get_outputs()[0].name} {sess.get_outputs()[0].shape}")
 except Exception as e:
     print(f"⚠️  Model loading test failed: {e}")
 EOF
 else
-    echo "⚠️  Dummy model not found, skipping model test"
+    echo "⚠️  No rf_classifier.onnx or spear_dummy.onnx — skipping ONNX load test"
 fi
 
 echo ""

@@ -27,10 +27,6 @@ from spear_edge.core.classify.pipeline import ClassifierPipeline
 from spear_edge.core.integrate.cot import CoTBroadcaster
 from spear_edge.core.integrate.tripwire_registry import TripwireRegistry
 
-import spear_edge.core.integrate.tripwire_registry as _twreg
-print("[DEBUG] TripwireRegistry loaded from:", _twreg.__file__)
-
-
 # Tripwire connection threshold (matches UI logic)
 CONNECTED_SECS = 5.0
 
@@ -258,17 +254,18 @@ class Orchestrator:
                 dual_channel=getattr(self.sdr_config, 'dual_channel', False) if self.sdr_config else False,  # Single channel by default
             )
 
+            # Stop FFT + RX drain BEFORE apply_config/tune. tune() may close/reopen the device
+            # (_setup_stream); concurrent read_samples from the old RX thread risks segfault.
+            if self._scan and self._scan.is_running():
+                await self._scan.stop()
+            if self._rx_task and self._rx_task.is_running():
+                await self._rx_task.stop()
+
             # Apply SDR config atomically
             try:
                 self.sdr.apply_config(self.sdr_config)
             except Exception as e:
                 print(f"[ORCH] apply_config failed: {e}")
-
-            # Stop existing scan if running
-            if self._scan and self._scan.is_running():
-                await self._scan.stop()
-            if self._rx_task and self._rx_task.is_running():
-                await self._rx_task.stop()
             
             # Clear FFT params when stopping scan
             self._current_fft_size = None

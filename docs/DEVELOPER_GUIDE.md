@@ -255,6 +255,8 @@ Spear Manager proxy endpoints (for Kismet service control from `/wifi`):
 These call Spear Manager (`SPEAR_WIFI_MANAGER_URL`) and include bearer auth
 when `SPEAR_WIFI_MANAGER_TOKEN` is set.
 
+Install / Kismet routes: **`docs/SPEAR_MANAGER.md`**, **`scripts/install_spear_manager.sh`** (unpacks tarball under `/home/spear/spear_manager` and patches `main.py`).
+
 Wi-Fi monitor environment variables:
 
 - `SPEAR_WIFI_MONITOR_AUTOSTART` (`true|false`)

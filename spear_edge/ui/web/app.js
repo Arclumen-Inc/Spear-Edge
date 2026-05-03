@@ -53,8 +53,9 @@ const wsLed             = document.getElementById("wsLed");
 const sdrLed            = document.getElementById("sdrLed");
 const gpsLed            = document.getElementById("gpsLed");
 const takLed            = document.getElementById("takLed");
-const gpsTopBarTimeEl   = document.getElementById("gpsTopBarTime");
-const gpsTopBarPosEl    = document.getElementById("gpsTopBarPos");
+const gpsTopBarTimeEl = document.getElementById("gpsTopBarTime");
+const gpsTopBarPosEl  = document.getElementById("gpsTopBarPos");
+const edgeIdInput     = document.getElementById("edgeIdInput");
 
 const freqInput         = document.getElementById("freqInput");       // MHz
 const rateInput         = document.getElementById("rateInput");       // MS/s
@@ -112,6 +113,22 @@ const API = {
       } catch (_) {}
     }
     throw new Error("hub_nodes_unavailable");
+  },
+
+  async getCotIdentity() {
+    const r = await fetch("/api/hub/cot-identity", { cache: "no-store" });
+    if (!r.ok) throw new Error("cot_identity_unavailable");
+    return await r.json();
+  },
+
+  async putCotIdentity(edgeId) {
+    const r = await fetch("/api/hub/cot-identity", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edge_id: edgeId }),
+    });
+    if (!r.ok) throw new Error(`cot_identity_save_${r.status}`);
+    return await r.json();
   },
   async captures() {
     const r = await fetch("/live/captures", { cache: "no-store" });
@@ -1955,7 +1972,7 @@ async function refreshStatus() {
       (gps.connected && gpsHasCoords);
     setLed(gpsLed, !!gpsHealthy);
     if (gpsTopBarTimeEl) {
-      gpsTopBarTimeEl.textContent = gps.time || "--:--:--Z";
+      gpsTopBarTimeEl.textContent = gps.time && String(gps.time).trim() ? String(gps.time) : "--:--:--Z";
     }
     if (gpsTopBarPosEl) {
       if (gpsHasCoords) {
@@ -3477,6 +3494,26 @@ async function setNetworkInterface(interfaceName) {
   }
 }
 
+async function hydrateCotEdgeIdField() {
+  if (!edgeIdInput) return;
+  try {
+    const j = await API.getCotIdentity();
+    const id = j.edge_id || j.callsign || "";
+    if (id) edgeIdInput.value = id;
+  } catch (_) {}
+}
+
+async function commitCotEdgeIdField() {
+  if (!edgeIdInput) return;
+  const raw = (edgeIdInput.value || "").trim() || "SPEAR-EDGE";
+  try {
+    const j = await API.putCotIdentity(raw);
+    if (j.callsign) edgeIdInput.value = j.callsign;
+  } catch (e) {
+    console.warn("[CoT] identity save failed:", e);
+  }
+}
+
 function init() {
   // Initialize DOM element references (ensure DOM is ready)
   if (!mlClassificationsEl) {
@@ -3500,6 +3537,19 @@ function init() {
   initNetworkCollapse();
   initTripwireCollapse();
   updateGainUiLock();
+
+  if (edgeIdInput) {
+    void hydrateCotEdgeIdField();
+    edgeIdInput.addEventListener("blur", () => {
+      void commitCotEdgeIdField();
+    });
+    edgeIdInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        edgeIdInput.blur();
+      }
+    });
+  }
 
   // -------------------------------------------------
   // INIT FIXED TRIPWIRE NODE CARDS (ALWAYS VISIBLE)
